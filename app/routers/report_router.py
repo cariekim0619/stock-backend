@@ -41,4 +41,3 @@ def get_report(request: ReportRequest):
         raise HTTPException(status_code=500, detail="invalid kakao skill format")
 
     return result
-

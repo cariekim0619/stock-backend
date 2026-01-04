@@ -439,4 +439,3 @@ def generate_raw_report(ticker: str) -> Dict[str, Any]:
     }
 
     return report_data
-
