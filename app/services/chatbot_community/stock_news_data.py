@@ -24,7 +24,7 @@ class StockNewsDataProvider:
         """Initialize"""
         # Tavily 웹 검색
         try:
-            from tavily_search import TavilySearchClient
+            from app.services.chatbot_community.tavily_search import TavilySearchClient
             self.tavily = TavilySearchClient()
         except Exception as e:
             print(f"Warning: Tavily 초기화 실패 - {e}")
