@@ -30,7 +30,7 @@ class ChatbotNewsCommunity:
     def __init__(self):
         """Initialize"""
         # 기존 데이터 프로바이더 사용
-        from stock_news_data import StockNewsDataProvider
+        from app.services.chatbot_community.stock_news_data import StockNewsDataProvider
         self.data_provider = StockNewsDataProvider()
 
         # Gemini (LLM)
