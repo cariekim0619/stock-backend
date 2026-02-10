@@ -1,4 +1,4 @@
-def _normalize_ticker(ticker: str) -> str:
+def normalize_ticker(ticker: str) -> str:
     """
     - '삼성전자' 같이 이름으로 들어와도
     - '005930' 같이 코드로 들어와도
