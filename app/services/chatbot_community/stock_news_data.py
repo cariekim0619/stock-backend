@@ -211,6 +211,7 @@ class StockNewsDataProvider:
         # 시장 반응 검색
         search_result = self.tavily.search_market_sentiment(
             company_name=company_name,
+            ticker=symbol,         # ✅ 추가 (필수)
             max_results=15
         )
 

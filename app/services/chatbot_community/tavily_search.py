@@ -45,7 +45,7 @@ def _resolve_symbol_and_name(company_name: str, ticker: str) -> Optional[Tuple[s
     '실존 종목' 기준으로 (정식회사명, 6자리코드)로 정규화한다.
 
     반환:
-      - (official_name, code) 또는 None(= 없는 종목/검증 실패)
+      - (official_name, code) 또는 None(= 없는 종목)
 
     정책:
     - ticker가 6자리 코드면: Code 존재 검증 후 Name 확정
@@ -76,7 +76,7 @@ def _resolve_symbol_and_name(company_name: str, ticker: str) -> Optional[Tuple[s
             official_name = str(row.iloc[0]["Name"])
             return official_name, code
 
-    # 3) company_name으로도 시도 (ticker가 비었거나 이상하면)
+    # 3) company_name으로도 시도
     if name_in:
         row = stocks[stocks["Name"] == name_in]
         if not row.empty:
@@ -84,23 +84,60 @@ def _resolve_symbol_and_name(company_name: str, ticker: str) -> Optional[Tuple[s
             official_name = str(row.iloc[0]["Name"])
             return official_name, code
 
-    # 못 찾으면 없는 종목
     return None
+
+
+def _now_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _no_stock_payload(company_name: str, ticker: str) -> Dict:
     """
-    없는 종목/검증 실패 시 공통 응답 포맷
-    - 상위(Chatbot)에서 이 값을 감지해 LLM 호출을 막거나
-      사용자에게 '없는 종목'을 안내하도록 사용
+    없는 종목일 때 공통 응답 포맷
     """
     return {
         "error": "NO_STOCK",
         "message": "없는 종목입니다.",
         "input_company_name": company_name,
         "input_ticker": ticker,
-        "searched_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        "searched_at": _now_str(),
     }
+
+
+def _verify_failed_payload(company_name: str, ticker: str) -> Dict:
+    """
+    FDR 미설치/조회 실패 등으로 검증 자체가 불가능할 때
+    - 운영에서 원인 파악용
+    """
+    return {
+        "error": "VERIFY_FAILED",
+        "message": "종목 검증에 실패했습니다. (KRX 목록 로드 실패)",
+        "input_company_name": company_name,
+        "input_ticker": ticker,
+        "searched_at": _now_str(),
+    }
+
+
+def _verify_and_normalize(company_name: str, ticker: str) -> Tuple[Optional[str], Optional[str], Optional[Dict]]:
+    """
+    (company_name, ticker) 입력을 검증/정규화하고
+    실패 시 바로 반환 payload를 만든다.
+
+    반환:
+      - (official_name, official_code, error_payload)
+      - 성공이면 error_payload = None
+      - 실패면 official_name/code = None
+    """
+    stocks = _krx_listing_cached()
+    if stocks is None:
+        return None, None, _verify_failed_payload(company_name, ticker)
+
+    resolved = _resolve_symbol_and_name(company_name, ticker)
+    if resolved is None:
+        return None, None, _no_stock_payload(company_name, ticker)
+
+    official_name, official_code = resolved
+    return official_name, official_code, None
 
 
 # =========================
@@ -114,7 +151,6 @@ class TavilySearchClient:
     """
 
     def __init__(self):
-        """Tavily API 초기화"""
         self.api_key = os.environ.get("TAVILY_API_KEY")
         if not self.api_key:
             raise ValueError("TAVILY_API_KEY not found in environment")
@@ -127,36 +163,15 @@ class TavilySearchClient:
             print("Warning: tavily-python not installed. Run: pip install tavily-python")
             self.available = False
 
-    def search_stock_news(
-        self,
-        company_name: str,
-        ticker: str,
-        max_results: int = 5
-    ) -> Dict:
-        """
-        종목 관련 최신 뉴스 검색
-
-        Args:
-            company_name: 회사명 (예: "삼성전자")
-            ticker: 종목코드 또는 종목명 (예: "005930" or "삼성전자")
-            max_results: 최대 결과 수
-
-        Returns:
-            검색 결과 딕셔너리
-        """
+    def search_stock_news(self, company_name: str, ticker: str, max_results: int = 5) -> Dict:
         if not self.available:
-            return {"error": "Tavily not available", "results": []}
+            return {"error": "Tavily not available", "results": [], "searched_at": _now_str()}
 
-        # ✅ 요구사항: 실존 종목 검증 + 정규화
-        resolved = _resolve_symbol_and_name(company_name, ticker)
-        if resolved is None:
-            return _no_stock_payload(company_name, ticker)
+        official_name, official_code, err = _verify_and_normalize(company_name, ticker)
+        if err is not None:
+            return err
 
-        official_name, official_code = resolved
-        company_name = official_name
-        ticker = official_code
-
-        query = f"{company_name} 주식 뉴스 최신"
+        query = f"{official_name} 주식 뉴스 최신"
 
         try:
             response = self.client.search(
@@ -164,243 +179,184 @@ class TavilySearchClient:
                 search_depth="basic",
                 max_results=max_results,
                 include_answer=True,
-                include_domains=["naver.com", "hankyung.com", "mk.co.kr", "sedaily.com", "edaily.co.kr"]
+                include_domains=["naver.com", "hankyung.com", "mk.co.kr", "sedaily.com", "edaily.co.kr"],
             )
 
             return {
-                "company_name": company_name,
-                "ticker": ticker,
+                "company_name": official_name,
+                "ticker": official_code,
                 "query": query,
                 "answer": response.get("answer", ""),
                 "results": [
                     {
                         "title": r.get("title", ""),
                         "url": r.get("url", ""),
-                        "content": r.get("content", "")[:300],  # 300자로 제한
-                        "score": r.get("score", 0)
+                        "content": (r.get("content", "") or "")[:300],
+                        "score": r.get("score", 0),
                     }
                     for r in response.get("results", [])
                 ],
-                "searched_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                "searched_at": _now_str(),
             }
         except Exception as e:
-            return {"error": str(e), "results": []}
+            return {"error": str(e), "results": [], "searched_at": _now_str()}
 
-    def search_analyst_opinion(
-        self,
-        company_name: str,
-        ticker: str,
-        max_results: int = 3
-    ) -> Dict:
-        """
-        애널리스트 의견/목표주가 검색
-
-        Args:
-            company_name: 회사명 (예: "삼성전자")
-            ticker: 종목코드 또는 종목명 (예: "005930" or "삼성전자")
-            max_results: 최대 결과 수
-
-        Returns:
-            검색 결과 딕셔너리
-        """
+    def search_analyst_opinion(self, company_name: str, ticker: str, max_results: int = 3) -> Dict:
         if not self.available:
-            return {"error": "Tavily not available", "results": []}
+            return {"error": "Tavily not available", "results": [], "searched_at": _now_str()}
 
-        # ✅ 요구사항: 실존 종목 검증 + 정규화
-        resolved = _resolve_symbol_and_name(company_name, ticker)
-        if resolved is None:
-            return _no_stock_payload(company_name, ticker)
+        official_name, official_code, err = _verify_and_normalize(company_name, ticker)
+        if err is not None:
+            return err
 
-        official_name, official_code = resolved
-        company_name = official_name
-        ticker = official_code
-
-        query = f"{company_name} 목표주가 애널리스트 리포트 2026"
+        query = f"{official_name} 목표주가 애널리스트 리포트 2026"
 
         try:
             response = self.client.search(
                 query=query,
                 search_depth="basic",
                 max_results=max_results,
-                include_answer=True
+                include_answer=True,
             )
 
             return {
-                "company_name": company_name,
-                "ticker": ticker,
+                "company_name": official_name,
+                "ticker": official_code,
                 "query": query,
                 "answer": response.get("answer", ""),
                 "results": [
                     {
                         "title": r.get("title", ""),
                         "url": r.get("url", ""),
-                        "content": r.get("content", "")[:300]
+                        "content": (r.get("content", "") or "")[:300],
                     }
                     for r in response.get("results", [])
                 ],
-                "searched_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                "searched_at": _now_str(),
             }
         except Exception as e:
-            return {"error": str(e), "results": []}
+            return {"error": str(e), "results": [], "searched_at": _now_str()}
 
-    def search_market_sentiment(
-        self,
-        company_name: str,
-        ticker: str,
-        max_results: int = 5
-    ) -> Dict:
+    def search_market_sentiment(self, company_name: str, ticker: str, max_results: int = 5) -> Dict:
         """
-        시장 반응/커뮤니티 의견 검색
-
-        Args:
-            company_name: 회사명
-            ticker: 종목코드 또는 종목명
-            max_results: 최대 결과 수
-
-        Returns:
-            검색 결과 딕셔너리
+        ✅ 여기서 ticker 필수
+        - stock_news_data.py에서 호출할 때 ticker를 반드시 넘겨야 함
         """
         if not self.available:
-            return {"error": "Tavily not available", "results": []}
+            return {"error": "Tavily not available", "results": [], "searched_at": _now_str()}
 
-        # ✅ 요구사항: 실존 종목 검증 + 정규화
-        resolved = _resolve_symbol_and_name(company_name, ticker)
-        if resolved is None:
-            return _no_stock_payload(company_name, ticker)
+        official_name, official_code, err = _verify_and_normalize(company_name, ticker)
+        if err is not None:
+            return err
 
-        official_name, official_code = resolved
-        company_name = official_name
-        ticker = official_code
-
-        query = f"{company_name} 주식 전망 투자 의견"
+        query = f"{official_name} 주식 전망 투자 의견"
 
         try:
             response = self.client.search(
                 query=query,
-                search_depth="basic",  # 비용 절감 (advanced → basic)
+                search_depth="basic",
                 max_results=max_results,
-                include_answer=True
+                include_answer=True,
             )
 
             return {
-                "company_name": company_name,
-                "ticker": ticker,
+                "company_name": official_name,
+                "ticker": official_code,
                 "query": query,
                 "answer": response.get("answer", ""),
                 "results": [
                     {
                         "title": r.get("title", ""),
                         "url": r.get("url", ""),
-                        "content": r.get("content", "")[:300]
+                        "content": (r.get("content", "") or "")[:300],
                     }
                     for r in response.get("results", [])
                 ],
-                "searched_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                "searched_at": _now_str(),
             }
         except Exception as e:
-            return {"error": str(e), "results": []}
+            return {"error": str(e), "results": [], "searched_at": _now_str()}
 
-    def get_comprehensive_info(
-        self,
-        company_name: str,
-        ticker: str
-    ) -> Dict:
+    def get_comprehensive_info(self, company_name: str, ticker: str) -> Dict:
         """
         종합 정보 검색 (뉴스 + 애널리스트 + 시장반응)
-
-        Args:
-            company_name: 회사명
-            ticker: 종목코드 또는 종목명
-
-        Returns:
-            종합 검색 결과
+        - 여기서 1번만 검증/정규화하고 하위 호출엔 정식 값으로 넘김
         """
-        # ✅ 여기서 1번만 정규화/검증해도 되지만
-        #    각 메서드에 이미 방어로직이 있어서 중복 안전
-        resolved = _resolve_symbol_and_name(company_name, ticker)
-        if resolved is None:
-            return _no_stock_payload(company_name, ticker)
+        if not self.available:
+            return {"error": "Tavily not available", "results": [], "searched_at": _now_str()}
 
-        official_name, official_code = resolved
-        company_name = official_name
-        ticker = official_code
+        official_name, official_code, err = _verify_and_normalize(company_name, ticker)
+        if err is not None:
+            return err
 
-        news = self.search_stock_news(company_name, ticker)
-        analyst = self.search_analyst_opinion(company_name, ticker)
-        sentiment = self.search_market_sentiment(company_name, ticker)
+        news = self.search_stock_news(official_name, official_code)
+        analyst = self.search_analyst_opinion(official_name, official_code)
+        sentiment = self.search_market_sentiment(official_name, official_code)
+
+        # 하위 중 하나라도 NO_STOCK/VERIFY_FAILED면 그대로 반환(일관성)
+        for part in (news, analyst, sentiment):
+            if isinstance(part, dict) and part.get("error") in ("NO_STOCK", "VERIFY_FAILED"):
+                return part
 
         return {
-            "company_name": company_name,
-            "ticker": ticker,
+            "company_name": official_name,
+            "ticker": official_code,
             "news": news,
             "analyst": analyst,
             "sentiment": sentiment,
-            "searched_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            "searched_at": _now_str(),
         }
 
     def format_for_llm(self, search_result: Dict) -> str:
         """
         검색 결과를 LLM 프롬프트용 텍스트로 변환
-
-        Args:
-            search_result: 검색 결과 딕셔너리
-
-        Returns:
-            포맷된 텍스트
+        ✅ 없는 종목/검증 실패면 프롬프트 생성 자체를 막음
         """
-        # ✅ 요구사항: 없는 종목이면 LLM 프롬프트 생성 자체를 막기
-        if isinstance(search_result, dict) and search_result.get("error") == "NO_STOCK":
-            return "없는 종목입니다."
+        if isinstance(search_result, dict) and search_result.get("error") in ("NO_STOCK", "VERIFY_FAILED"):
+            return search_result.get("message", "없는 종목입니다.")
 
         lines = []
 
-        # 뉴스 섹션
+        # 뉴스
         if "news" in search_result:
             news = search_result["news"]
-            # 뉴스 자체가 없는 종목 에러면 바로 반환
-            if isinstance(news, dict) and news.get("error") == "NO_STOCK":
-                return "없는 종목입니다."
+            if isinstance(news, dict) and news.get("error") in ("NO_STOCK", "VERIFY_FAILED"):
+                return news.get("message", "없는 종목입니다.")
 
             lines.append("### 최신 뉴스")
             if news.get("answer"):
                 lines.append(f"요약: {news['answer'][:500]}")
             for i, r in enumerate(news.get("results", [])[:3], 1):
-                title = r.get("title", "")
-                content = r.get("content", "")
-                lines.append(f"{i}. [{title}]")
-                lines.append(f"   {content[:150]}...")
+                lines.append(f"{i}. [{r.get('title','')}]")
+                lines.append(f"   {(r.get('content','') or '')[:150]}...")
             lines.append("")
 
-        # 애널리스트 의견 섹션
+        # 애널리스트
         if "analyst" in search_result:
             analyst = search_result["analyst"]
-            if isinstance(analyst, dict) and analyst.get("error") == "NO_STOCK":
-                return "없는 종목입니다."
+            if isinstance(analyst, dict) and analyst.get("error") in ("NO_STOCK", "VERIFY_FAILED"):
+                return analyst.get("message", "없는 종목입니다.")
 
             lines.append("### 애널리스트 의견")
             if analyst.get("answer"):
                 lines.append(f"요약: {analyst['answer'][:500]}")
             for i, r in enumerate(analyst.get("results", [])[:2], 1):
-                title = r.get("title", "")
-                content = r.get("content", "")
-                lines.append(f"{i}. [{title}]")
-                lines.append(f"   {content[:150]}...")
+                lines.append(f"{i}. [{r.get('title','')}]")
+                lines.append(f"   {(r.get('content','') or '')[:150]}...")
             lines.append("")
 
-        # 시장 반응 섹션
+        # 시장 반응
         if "sentiment" in search_result:
             sentiment = search_result["sentiment"]
-            if isinstance(sentiment, dict) and sentiment.get("error") == "NO_STOCK":
-                return "없는 종목입니다."
+            if isinstance(sentiment, dict) and sentiment.get("error") in ("NO_STOCK", "VERIFY_FAILED"):
+                return sentiment.get("message", "없는 종목입니다.")
 
             lines.append("### 시장 반응/커뮤니티")
             if sentiment.get("answer"):
                 lines.append(f"요약: {sentiment['answer'][:500]}")
             for i, r in enumerate(sentiment.get("results", [])[:2], 1):
-                title = r.get("title", "")
-                content = r.get("content", "")
-                lines.append(f"{i}. [{title}]")
-                lines.append(f"   {content[:150]}...")
+                lines.append(f"{i}. [{r.get('title','')}]")
+                lines.append(f"   {(r.get('content','') or '')[:150]}...")
             lines.append("")
 
         return "\n".join(lines) if lines else "웹 검색 결과 없음"
@@ -409,7 +365,6 @@ class TavilySearchClient:
 # ========================================
 # 테스트
 # ========================================
-
 if __name__ == "__main__":
     print("=" * 60)
     print("Tavily 웹 검색 테스트")
@@ -418,59 +373,25 @@ if __name__ == "__main__":
 
     try:
         client = TavilySearchClient()
-        print("[OK] Tavily 클라이언트 초기화 성공")
-        print()
+        print("[OK] Tavily 클라이언트 초기화 성공\n")
 
-        # ✅ 테스트 1: 정상 케이스
+        # 테스트 1: 정상 케이스
         company = "삼성전자"
         ticker = "005930"
-
-        print(f"[TEST 1] 검색 중: {company} ({ticker})")
-        print("-" * 40)
-
+        print(f"[TEST 1] {company} ({ticker})")
         result = client.get_comprehensive_info(company, ticker)
+        print("result.error:", result.get("error"))
+        print("company_name:", result.get("company_name"))
+        print("ticker:", result.get("ticker"))
+        print()
 
-        if result.get("error") == "NO_STOCK":
-            print("[NO_STOCK] 없는 종목으로 판정됨")
-        else:
-            # 뉴스 출력
-            print("\n[최신 뉴스]")
-            news = result.get("news", {})
-            if news.get("answer"):
-                print(f"AI 요약: {news['answer'][:200]}...")
-            for r in news.get("results", [])[:3]:
-                print(f"  - {r.get('title', '')}")
-
-            # 애널리스트 출력
-            print("\n[애널리스트 의견]")
-            analyst = result.get("analyst", {})
-            if analyst.get("answer"):
-                print(f"AI 요약: {analyst['answer'][:200]}...")
-            for r in analyst.get("results", [])[:2]:
-                print(f"  - {r.get('title', '')}")
-
-            # LLM용 포맷
-            print("\n[LLM 프롬프트용 텍스트]")
-            print("-" * 40)
-            formatted = client.format_for_llm(result)
-            print(formatted[:500] + "..." if len(formatted) > 500 else formatted)
-
-        print("\n[OK] 테스트 완료!")
-
-        # ✅ 테스트 2: 오타 케이스(없는 종목)
+        # 테스트 2: 오타 케이스
         company2 = "삼삼전자"
         ticker2 = "삼삼전자"
-
-        print("\n" + "=" * 60)
-        print(f"[TEST 2] 오타 케이스: {company2} ({ticker2})")
-        print("-" * 40)
-
+        print(f"[TEST 2] {company2} ({ticker2})")
         result2 = client.get_comprehensive_info(company2, ticker2)
-        print(result2)  # error: NO_STOCK 확인
-
-        formatted2 = client.format_for_llm(result2)
-        print("\n[LLM 포맷 결과]")
-        print(formatted2)
+        print(result2)
+        print("\nLLM 포맷:", client.format_for_llm(result2))
 
     except Exception as e:
         print(f"[ERROR] {e}")
