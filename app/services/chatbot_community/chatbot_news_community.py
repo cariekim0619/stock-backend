@@ -13,6 +13,7 @@ import os
 from typing import Dict, List, Optional
 from datetime import datetime
 from dotenv import load_dotenv
+from app.utils.ticker_normalizer import resolve_symbol_and_name
 
 load_dotenv()
 
@@ -49,11 +50,7 @@ class ChatbotNewsCommunity:
     # 커뮤니티 요약
     # ========================================
 
-    def get_community_summary(
-        self,
-        symbol: str,
-        company_name: str
-    ) -> Dict:
+    def get_community_summary(self, ticker: str) -> Dict:
         """
         커뮤니티 요약 (챗봇용)
 
@@ -77,6 +74,8 @@ class ChatbotNewsCommunity:
                 "web_url": "https://..."
             }
         """
+        symbol, company_name = resolve_symbol_and_name(ticker)
+
         # 커뮤니티 데이터 조회
         community_data = self.data_provider.get_community(
             symbol=symbol,
@@ -245,11 +244,7 @@ class ChatbotNewsCommunity:
     # 뉴스 요약
     # ========================================
 
-    def get_news_summary(
-        self,
-        symbol: str,
-        company_name: str
-    ) -> Dict:
+    def get_news_summary(self, ticker: str) -> Dict:
         """
         뉴스 요약 (챗봇용)
 
@@ -273,6 +268,7 @@ class ChatbotNewsCommunity:
                 "web_url": "https://..."
             }
         """
+        symbol, company_name = resolve_symbol_and_name(ticker)
         # 뉴스 데이터 조회
         news_data = self.data_provider.get_news(
             symbol=symbol,
