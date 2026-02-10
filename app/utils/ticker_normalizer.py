@@ -1,7 +1,6 @@
 from typing import Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
 import os
-from app.utils.ticker_normalizer import normalize_ticker
 
 # -------------------------------------------------------------------
 # 0) FinanceDataReader (실시간/준실시간 주가용)
@@ -55,6 +54,38 @@ NAME_TO_CODE: Dict[str, str] = {
 # -------------------------------------------------------------------
 # 2) 공통 유틸: 티커 정규화 / 포맷터
 # -------------------------------------------------------------------
+def _normalize_ticker(ticker: str) -> str:
+    """
+    - '삼성전자' 같이 이름으로 들어와도
+    - '005930' 같이 코드로 들어와도
+    → 모두 6자리 코드로 정규화
+    """
+    if not ticker:
+        return ticker
+
+    t = ticker.strip()
+
+    # 1) 미리 정의한 이름 매핑 우선
+    if t in NAME_TO_CODE:
+        return NAME_TO_CODE[t]
+
+    # 2) 이미 종목코드 형태면 바로 반환
+    if t.isdigit() and len(t) == 6:
+        return t
+
+    # 3) 이름이면 FDR 종목 리스트에서 검색
+    if fdr is not None:
+        try:
+            stocks = fdr.StockListing("KRX")
+            row = stocks[stocks["Name"] == t]
+            if not row.empty:
+                return str(row.iloc[0]["Code"])
+        except Exception as e:
+            print("[_normalize_ticker] KRX 조회 실패:", e)
+
+    # 못 찾으면 그대로 반환 (→ 나중에 데이터 없음 처리)
+    return t
+
 
 def _fmt_pct(v: Optional[float]) -> str:
     if not isinstance(v, (int, float)):
@@ -72,7 +103,7 @@ def _fmt_won(v: Optional[float]) -> str:
 # 3) 실시간 스냅샷: 가격/수익률/기본 정보 (FDR)
 # -------------------------------------------------------------------
 def load_stock_snapshot(ticker: str) -> Optional[Dict[str, Any]]:
-    code = normalize_ticker(ticker)
+    code = _normalize_ticker(ticker)
 
     if fdr is None:
         print("[load_stock_snapshot] FinanceDataReader 미설치 → None 반환")
@@ -180,7 +211,7 @@ def load_stock_metrics(ticker: str) -> Dict[str, Any]:
     - 없거나 에러면 키만 만들고 None으로 채움
     - 이후 DART 보강 단계에서 실제 값 계산
     """
-    code = normalize_ticker(ticker)
+    code = _normalize_ticker(ticker)
 
     if fdr is not None and hasattr(fdr, "StockSummary"):
         try:
@@ -228,7 +259,7 @@ def _enhance_metrics_with_dart_if_needed(
         # FDR에서라도 값이 하나라도 있으면 그걸 우선 사용
         return metrics, None
 
-    code = normalize_ticker(ticker)
+    code = _normalize_ticker(ticker)
     print(f"[DART] FDR metrics 없음 → DART 재무제표로 재계산 시도 (ticker={code})")
 
     # 1) DART 재무제표 로딩
@@ -308,7 +339,7 @@ def generate_raw_report(ticker: str) -> Dict[str, Any]:
     financial_text: Optional[str] = None
     try:
         metrics, financial_text = _enhance_metrics_with_dart_if_needed(
-            ticker=snapshot.get("ticker") or normalize_ticker(ticker),
+            ticker=snapshot.get("ticker") or _normalize_ticker(ticker),
             metrics=metrics,
             current_price=current_price,
         )
@@ -323,7 +354,7 @@ def generate_raw_report(ticker: str) -> Dict[str, Any]:
 
     raw_data: Dict[str, Any] = {
         "basic": {
-            "ticker": snapshot.get("ticker") or normalize_ticker(ticker),
+            "ticker": snapshot.get("ticker") or _normalize_ticker(ticker),
             "name": name,
             "current_price": current_price,
             "market_cap": market_cap,
@@ -389,7 +420,7 @@ def generate_raw_report(ticker: str) -> Dict[str, Any]:
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     report_data: Dict[str, Any] = {
-        "ticker": snapshot.get("ticker") or normalize_ticker(ticker),
+        "ticker": snapshot.get("ticker") or _normalize_ticker(ticker),
         "name": name,
         "generated_at": generated_at,
         "report": {
