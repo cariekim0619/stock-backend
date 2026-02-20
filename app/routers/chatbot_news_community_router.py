@@ -43,14 +43,11 @@ def chatbot_community(req: BriefingRequest):
 
     symbol, company_name = resolved
 
-    # ✅ 서비스는 ticker가 아니라 symbol/company_name을 받는다고 가정하고 호출
     summary = chatbot.get_community_summary(
         symbol=symbol,
         company_name=company_name,
-        user_name=req.user_name,
     )
     return chatbot.format_community_for_kakao(summary, user_name=req.user_name)
-
 
 @router.post("/news")
 def chatbot_news(req: BriefingRequest):
