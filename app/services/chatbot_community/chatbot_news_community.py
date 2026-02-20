@@ -50,7 +50,11 @@ class ChatbotNewsCommunity:
     # 커뮤니티 요약
     # ========================================
 
-    def get_community_summary(self, ticker: str) -> Dict:
+    def get_community_summary(
+        self,
+        symbol: str,
+        company_name: str
+    ) -> Dict:
         """
         커뮤니티 요약 (챗봇용)
 
@@ -74,7 +78,6 @@ class ChatbotNewsCommunity:
                 "web_url": "https://..."
             }
         """
-        symbol, company_name = resolve_symbol_and_name(ticker)
 
         # 커뮤니티 데이터 조회
         community_data = self.data_provider.get_community(
@@ -224,7 +227,21 @@ class ChatbotNewsCommunity:
         try:
             model = self.genai.GenerativeModel('gemini-2.5-flash')
             response = model.generate_content(prompt)
-            opinions = [line.strip() for line in response.text.strip().split('\n') if line.strip()]
+            import re
+            opinions = []
+            for line in response.text.strip().split('\n'):
+                line = line.strip()
+                if not line:
+                    continue
+                # LLM이 반복하는 헤더/라벨 제거
+                if '대표' in line and ('의견' in line or '3개' in line) and line.endswith(':'):
+                    continue
+                # 번호 접두사 제거 (1. 2. 등)
+                line = re.sub(r'^\d+[\.\)]\s*', '', line)
+                # bullet 접두사 제거
+                line = re.sub(r'^[\-\•\*]\s*', '', line).strip()
+                if line:
+                    opinions.append(line)
             return opinions[:3]
         except Exception:
             # 실패 시 제목 사용
@@ -244,7 +261,11 @@ class ChatbotNewsCommunity:
     # 뉴스 요약
     # ========================================
 
-    def get_news_summary(self, ticker: str) -> Dict:
+    def get_news_summary(
+        self,
+        symbol: str,
+        company_name: str
+    ) -> Dict:
         """
         뉴스 요약 (챗봇용)
 
@@ -268,7 +289,7 @@ class ChatbotNewsCommunity:
                 "web_url": "https://..."
             }
         """
-        symbol, company_name = resolve_symbol_and_name(ticker)
+
         # 뉴스 데이터 조회
         news_data = self.data_provider.get_news(
             symbol=symbol,
@@ -365,7 +386,21 @@ class ChatbotNewsCommunity:
         try:
             model = self.genai.GenerativeModel('gemini-2.5-flash')
             response = model.generate_content(prompt)
-            summaries = [line.strip() for line in response.text.strip().split('\n') if line.strip()]
+            import re
+            summaries = []
+            for line in response.text.strip().split('\n'):
+                line = line.strip()
+                if not line:
+                    continue
+                # LLM이 반복하는 헤더/라벨 제거
+                if '핵심' in line and '이슈' in line and line.endswith(':'):
+                    continue
+                # 번호 접두사 제거 (1. 2. 등)
+                line = re.sub(r'^\d+[\.\)]\s*', '', line)
+                # bullet 접두사 제거
+                line = re.sub(r'^[\-\•\*]\s*', '', line).strip()
+                if line:
+                    summaries.append(line)
 
             # 원본 데이터와 결합
             key_issues = []

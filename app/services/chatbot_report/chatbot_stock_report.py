@@ -85,6 +85,9 @@ class ChatbotStockReport:
         # 4. 기간별 수익률 계산
         data["returns"] = self._calculate_returns(symbol)
 
+        # 5. DART 재무 지표 (부채비율, 현금흐름)
+        data["dart"] = self.chart_provider.get_dart_metrics(symbol)
+
         return data
 
     def _calculate_returns(self, symbol: str) -> Dict:
@@ -174,21 +177,35 @@ class ChatbotStockReport:
         fundamental = data.get("fundamental", {})
         technical = data.get("technical", {})
         returns = data.get("returns", {})
+        dart = data.get("dart", {})
 
         rsi_info = technical.get("rsi", {})
+
+        # DART 데이터 라인 (있을 때만)
+        dart_line = ""
+        if "error" not in dart:
+            parts = []
+            if dart.get("debt_ratio") is not None:
+                parts.append(f"부채비율: {dart['debt_ratio']:.1f}%")
+            if dart.get("operating_cf") is not None:
+                cf_sign = "+" if dart["operating_cf"] > 0 else ""
+                parts.append(f"영업현금흐름: {cf_sign}{dart['operating_cf']:,.0f}원")
+            if parts:
+                dart_line = "\n" + " / ".join(parts)
 
         prompt = f"""다음은 {company_name}의 투자 데이터입니다.
 
 현재가: {info.get('current_price', 'N/A')}원 ({info.get('price_change', 0):+}원)
 PER: {fundamental.get('per', 'N/A')} / PBR: {fundamental.get('pbr', 'N/A')} / ROE: {fundamental.get('roe', 'N/A')}%
 RSI: {rsi_info.get('value', 'N/A')} ({rsi_info.get('signal', {}).get('description', 'N/A')})
-1개월 수익률: {returns.get('1m', 'N/A')}% / 3개월: {returns.get('3m', 'N/A')}% / 1년: {returns.get('1y', 'N/A')}%
+1개월 수익률: {returns.get('1m', 'N/A')}% / 3개월: {returns.get('3m', 'N/A')}% / 1년: {returns.get('1y', 'N/A')}%{dart_line}
 
 조건:
 - 핵심 포인트 3개를 bullet으로 작성 (각 30자 이내)
 - "~에요", "~있어요" 친근한 말투
 - 마지막에 "주요 체크 포인트" 1줄 추가
 - 매수/매도 추천 금지
+- 위에 제공된 데이터만 언급하세요. 데이터에 없는 지표는 언급하지 마세요.
 
 형식:
 • [포인트1]
@@ -217,6 +234,27 @@ RSI: {rsi_info.get('value', 'N/A')} ({rsi_info.get('signal', {}).get('descriptio
     def _generate_financial_text(self, data: Dict, company_name: str) -> Dict:
         """재무 분석 텍스트 생성"""
         fundamental = data.get("fundamental", {})
+        dart = data.get("dart", {})
+
+        # DART 재무 데이터 섹션
+        dart_section = ""
+        if "error" not in dart:
+            dart_lines = []
+            if dart.get("debt_ratio") is not None:
+                dart_lines.append(f"부채비율: {dart['debt_ratio']:.1f}%")
+            if dart.get("revenue") is not None:
+                dart_lines.append(f"매출액: {dart['revenue']:,.0f}원")
+            if dart.get("operating_margin") is not None:
+                dart_lines.append(f"영업이익률: {dart['operating_margin']:.1f}%")
+            if dart.get("operating_cf") is not None:
+                dart_lines.append(f"영업활동 현금흐름: {dart['operating_cf']:,.0f}원")
+            if dart.get("investing_cf") is not None:
+                dart_lines.append(f"투자활동 현금흐름: {dart['investing_cf']:,.0f}원")
+            if dart.get("financing_cf") is not None:
+                dart_lines.append(f"재무활동 현금흐름: {dart['financing_cf']:,.0f}원")
+            if dart_lines:
+                dart_section = "\n" + "\n".join(dart_lines)
+                dart_section += f"\n(출처: {dart.get('report_label', 'DART')})"
 
         prompt = f"""다음은 {company_name}의 재무 데이터입니다.
 
@@ -224,13 +262,14 @@ PER: {fundamental.get('per', 'N/A')}
 PBR: {fundamental.get('pbr', 'N/A')}
 EPS: {fundamental.get('eps', 'N/A')}원
 BPS: {fundamental.get('bps', 'N/A')}원
-ROE: {fundamental.get('roe', 'N/A')}%
+ROE: {fundamental.get('roe', 'N/A')}%{dart_section}
 
 조건:
 - 핵심 포인트 3개를 bullet으로 작성 (각 30자 이내)
 - "~에요", "~있어요" 친근한 말투
 - 마지막에 재무 안정성 체크포인트 1줄
 - 매수/매도 추천 금지
+- 위에 제공된 데이터만 언급하세요. 데이터에 없는 지표는 언급하지 마세요.
 
 형식:
 • [포인트1]
@@ -266,7 +305,8 @@ PER: {fundamental.get('per', 'N/A')} / PBR: {fundamental.get('pbr', 'N/A')} / RO
 - "~에요", "~있어요" 친근한 말투
 - 업종 평균 대비 수준 언급
 - 매수/매도 추천 금지
-- 인사말이나 서두 없이 바로 해석만 작성"""
+- 인사말이나 서두 없이 바로 해석만 작성
+- 위에 제공된 데이터만 언급하세요. 데이터에 없는 지표는 언급하지 마세요."""
 
         result = self._generate_llm_text(prompt)
         if result:
@@ -308,6 +348,7 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
 - "~에요", "~있어요" 친근한 말투
 - 마지막에 리스크 관련 주의사항 1줄
 - 매수/매도 추천 금지, 정보 제공만
+- 위에 제공된 데이터만 언급하세요. 데이터에 없는 지표는 언급하지 마세요.
 
 형식:
 • [의견1]
@@ -395,6 +436,10 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
                 "per": fundamental.get("per", 0),
                 "pbr": fundamental.get("pbr", 0),
                 "roe": fundamental.get("roe", 0),
+                **({
+                    "debt_ratio": data.get("dart", {}).get("debt_ratio"),
+                    "operating_cf": data.get("dart", {}).get("operating_cf"),
+                } if "error" not in data.get("dart", {"error": True}) else {}),                
             },
             "rsi_signal": rsi_signal,
             "investment_summary": summary_text,

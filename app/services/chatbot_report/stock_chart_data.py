@@ -25,6 +25,11 @@ except ImportError:
     HantuStock = None
 
 try:
+    from app.client.dart_client_v2 import DartClient
+except ImportError:
+    DartClient = None
+
+try:
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 except ImportError:
@@ -50,6 +55,16 @@ class StockChartDataProvider:
             except Exception as e:
                 print(f"[WARN] HantuStock 초기화 실패: {e}. 일부 기능 제한됨.")
 
+        # DART 클라이언트 (부채비율/현금흐름 등)
+        self._dart = None
+        if DartClient is not None:
+            try:
+                import os
+                dart_key = os.environ.get("DART_API_KEY", "")
+                if dart_key:
+                    self._dart = DartClient(api_key=dart_key)
+            except Exception as e:
+                print(f"[WARN] DartClient 초기화 실패: {e}")
     # ==================== 기본 정보 ====================
 
     def get_stock_info(self, ticker: str) -> Dict:
@@ -768,6 +783,21 @@ class StockChartDataProvider:
 
         return result
 
+    # ==================== DART 재무 지표 ====================
+    def get_dart_metrics(self, ticker: str) -> Dict:
+        """
+        DART 재무제표 기반 추가 지표 (부채비율, 현금흐름 등)
+        Returns:
+            dict: debt_ratio, operating_cf, investing_cf, financing_cf 등
+            실패 시: {"error": "사유"}
+        """
+        if not self._dart:
+            return {"error": "DART API를 사용할 수 없습니다."}
+        try:
+            return self._dart.get_financial_summary(ticker)
+        except Exception as e:
+            return {"error": str(e)}
+        
     # ==================== 통합 API ====================
 
     def get_chart_page_data(self, ticker: str, chart_period: str = "3m") -> Dict:
@@ -797,6 +827,9 @@ class StockChartDataProvider:
 
         # 4. 기술적 분석
         result["technical"] = self.get_technical_indicators(ticker)
+	
+        # 5. DART 재무 지표 (부채비율, 현금흐름)
+        result["dart_metrics"] = self.get_dart_metrics(ticker)
 
         return result
 
