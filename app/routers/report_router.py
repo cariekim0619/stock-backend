@@ -3,8 +3,6 @@ from pydantic import BaseModel
 from typing import Optional, List
 
 from app.services.report_service import generate_report
-from app.services.chatbot_stock_report_v2 import ChatbotStockReportV2
-
 
 router = APIRouter(
     prefix="/api/stocks",
