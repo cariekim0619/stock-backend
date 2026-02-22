@@ -172,19 +172,44 @@ def _normalize_symbol(ticker: str) -> str:
 
 def _resolve_company_name(bot: ChatbotStockReport, symbol: str, fallback: str) -> str:
     """
-    get_report_summary(symbol, company_name)에서 company_name은 프롬프트/메시지에 쓰임
-    - 가능하면 chart_provider.get_stock_info(symbol)에서 이름을 뽑는다
+    company_name을 최대한 정확히 뽑는다.
+    1) chart_provider.get_stock_info(symbol)에서 Name/종목명 등 탐색
+    2) 그래도 없으면 FinanceDataReader StockListing('KRX')에서 Code 매칭
+    3) 마지막 fallback
     """
+    # 1) chart_provider에서 이름 뽑기
     try:
         info = bot.chart_provider.get_stock_info(symbol)  # type: ignore[attr-defined]
         if isinstance(info, dict):
-            # 프로젝트마다 키가 다를 수 있어 여러 후보를 확인
-            for key in ("name", "company_name", "company", "종목명"):
+            # 실제 프로젝트에서 흔히 쓰는 키들을 최대한 넓게 커버
+            candidates = [
+                "name", "Name",
+                "company_name", "company", "Company",
+                "stock_name", "종목명",
+            ]
+            for key in candidates:
                 v = info.get(key)
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
+                if isinstance(v, str):
+                    name = v.strip()
+                    # 값이 종목코드(005930)처럼 숫자만이면 회사명으로 쓰지 않음
+                    if name and not name.isdigit() and name != symbol:
+                        return name
     except Exception:
         pass
+
+    # 2) FinanceDataReader로 회사명 매핑(가능하면)
+    try:
+        import FinanceDataReader as fdr
+        stocks = fdr.StockListing("KRX")
+        row = stocks[stocks["Code"] == symbol]
+        if not row.empty:
+            nm = str(row.iloc[0].get("Name", "")).strip()
+            if nm:
+                return nm
+    except Exception:
+        pass
+
+    # 3) fallback
     return fallback
 
 
