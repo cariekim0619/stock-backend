@@ -13,6 +13,7 @@ import os
 from typing import Dict, List, Optional
 from datetime import datetime
 from dotenv import load_dotenv
+from app.utils.gemini_compat import GeminiCompatClient
 
 load_dotenv()
 
@@ -47,10 +48,9 @@ class ChatbotStockReport:
         self.gemini_key = os.environ.get("GEMINI_API_KEY")
         if self.gemini_key:
             try:
-                import google.generativeai as genai
-                genai.configure(api_key=self.gemini_key)
-                self.genai = genai
-            except ImportError:
+                self.genai = GeminiCompatClient(self.gemini_key)
+            except Exception as e:
+                print(f"Warning: Gemini 초기화 실패 - {e}")
                 self.genai = None
         else:
             self.genai = None

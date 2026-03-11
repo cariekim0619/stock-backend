@@ -42,6 +42,8 @@ def chatbot_community(req: BriefingRequest):
         return _no_stock_kakao(req.ticker)
 
     symbol, company_name = resolved
+    if not symbol or not symbol.isdigit() or len(symbol) != 6:
+        return _no_stock_kakao(req.ticker)
 
     summary = chatbot.get_community_summary(
         symbol=symbol,
@@ -56,6 +58,8 @@ def chatbot_news(req: BriefingRequest):
         return _no_stock_kakao(req.ticker)
 
     symbol, company_name = resolved
+    if not symbol or not symbol.isdigit() or len(symbol) != 6:
+        return _no_stock_kakao(req.ticker)
 
     summary = chatbot.get_news_summary(
         symbol=symbol,

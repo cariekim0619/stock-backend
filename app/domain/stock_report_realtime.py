@@ -23,7 +23,7 @@ from app.domain.dart_financial_loader import DartFinancialLoader
 from app.domain.metrics_calculator import MetricsCalculator
 from app.utils.report_formatter import ReportFormatter
 from app.clients.dart_client import DartClient
-import google.generativeai as genai
+from app.utils.gemini_compat import GeminiCompatClient
 
 class RealtimeStockReportGenerator:
     """
@@ -57,7 +57,9 @@ class RealtimeStockReportGenerator:
 
         # Gemini API (LLM)
         self.gemini_key = os.environ.get("GEMINI_API_KEY")
-        genai.configure(api_key=self.gemini_key)
+        if not self.gemini_key:
+            raise ValueError("GEMINI_API_KEY not found in environment")
+        self.genai = GeminiCompatClient(self.gemini_key)
         print("✅ Gemini API 초기화 완료\n")
 
     def generate_report(self, ticker: str) -> Dict:
@@ -215,7 +217,7 @@ class RealtimeStockReportGenerator:
 
         # Gemini로 리포트 생성
         try:
-            model = genai.GenerativeModel('gemini-2.5-flash')
+            model = self.genai.GenerativeModel('gemini-2.5-flash')
             response = model.generate_content(prompt)
             report_text = response.text
 

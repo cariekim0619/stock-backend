@@ -7,9 +7,11 @@ from app.services.chatbot_report.chatbot_stock_report import ChatbotStockReport
 
 # (선택) 티커 정규화 유틸이 있으면 사용
 try:
-    from app.utils.ticker_normalizer import normalize_ticker
+    from app.utils.ticker_normalizer import normalize_ticker, resolve_symbol_and_name, get_company_name_by_symbol
 except Exception:
     normalize_ticker = None
+    resolve_symbol_and_name = None
+    get_company_name_by_symbol = None
 
 
 router = APIRouter(
@@ -162,26 +164,44 @@ def _normalize_symbol(ticker: str) -> str:
     t = (ticker or "").strip()
     if not t:
         return ""
+
+    if resolve_symbol_and_name:
+        try:
+            resolved = resolve_symbol_and_name(t)
+            if resolved:
+                return resolved[0]
+            return ""
+        except Exception:
+            pass
+
     if normalize_ticker:
         try:
-            return normalize_ticker(t)
+            normalized = normalize_ticker(t)
+            if normalized and normalized.isdigit() and len(normalized) == 6:
+                return normalized
         except Exception:
-            return t
-    return t
+            pass
+    return ""
 
 
 def _resolve_company_name(bot: ChatbotStockReport, symbol: str, fallback: str) -> str:
     """
     company_name을 최대한 정확히 뽑는다.
-    1) chart_provider.get_stock_info(symbol)에서 Name/종목명 등 탐색
-    2) 그래도 없으면 FinanceDataReader StockListing('KRX')에서 Code 매칭
+    1) S3 stock universe cache 에서 code -> company_name 역조회
+    2) chart_provider.get_stock_info(symbol)에서 Name/종목명 탐색
     3) 마지막 fallback
     """
-    # 1) chart_provider에서 이름 뽑기
+    if get_company_name_by_symbol:
+        try:
+            cached_name = get_company_name_by_symbol(symbol)
+            if isinstance(cached_name, str) and cached_name.strip():
+                return cached_name.strip()
+        except Exception:
+            pass
+
     try:
         info = bot.chart_provider.get_stock_info(symbol)  # type: ignore[attr-defined]
         if isinstance(info, dict):
-            # 실제 프로젝트에서 흔히 쓰는 키들을 최대한 넓게 커버
             candidates = [
                 "name", "Name",
                 "company_name", "company", "Company",
@@ -191,25 +211,11 @@ def _resolve_company_name(bot: ChatbotStockReport, symbol: str, fallback: str) -
                 v = info.get(key)
                 if isinstance(v, str):
                     name = v.strip()
-                    # 값이 종목코드(005930)처럼 숫자만이면 회사명으로 쓰지 않음
                     if name and not name.isdigit() and name != symbol:
                         return name
     except Exception:
         pass
 
-    # 2) FinanceDataReader로 회사명 매핑(가능하면)
-    try:
-        import FinanceDataReader as fdr
-        stocks = fdr.StockListing("KRX")
-        row = stocks[stocks["Code"] == symbol]
-        if not row.empty:
-            nm = str(row.iloc[0].get("Name", "")).strip()
-            if nm:
-                return nm
-    except Exception:
-        pass
-
-    # 3) fallback
     return fallback
 
 

@@ -1,7 +1,7 @@
 from typing import Dict, Any, Optional, Tuple, List
 from datetime import datetime, timedelta
 import os
-from app.utils.ticker_normalizer import normalize_ticker
+from app.utils.ticker_normalizer import normalize_ticker, resolve_symbol_and_name
 
 # -------------------------------------------------------------------
 # 0) FinanceDataReader (실시간/준실시간 주가용)
@@ -43,14 +43,6 @@ if DartClient and DartFinancialLoader and MetricsCalculator:
     else:
         print("[raw_report_service] ⚠️ DART_API_KEY 미설정")
 
-# -------------------------------------------------------------------
-# 1) 최소한의 종목명 -> 코드 매핑 (자주 쓰는 것만 하드코딩)
-# -------------------------------------------------------------------
-NAME_TO_CODE: Dict[str, str] = {
-    "삼성전자": "005930",
-    "카카오": "035720",
-    "LG에너지솔루션": "373220",
-}
 
 # -------------------------------------------------------------------
 # 2) 공통 유틸: 티커 정규화 / 포맷터
@@ -113,7 +105,7 @@ def _extract_amount_contains(financial_df: Any, keys: List[str]) -> Optional[flo
 
         # 문자열 포함 매칭(가장 먼저 찾은 값)
         for key in keys:
-            rows = financial_df[financial_df["account_nm"].astype(str).str.contains(key, na=False)]
+            rows = financial_df[financial_df["account_nm"].astype(str).str.contains(key, na=False, regex=False)]
             if not rows.empty:
                 val = rows.iloc[0][col]
                 return _to_float_amount(val)
@@ -327,46 +319,19 @@ def _build_investment_opinion_text(ret_3m: Any, ret_1y: Any, rsi_signal: str, fi
 # 3) 실시간 스냅샷: 가격/수익률/기본 정보 (FDR)
 # -------------------------------------------------------------------
 def load_stock_snapshot(ticker: str) -> Optional[Dict[str, Any]]:
-    code = normalize_ticker(ticker)
+    resolved = resolve_symbol_and_name(ticker)
+    if not resolved:
+        raw = (ticker or "").strip()
+        code = normalize_ticker(raw)
+        print(f"[load_stock_snapshot] 유효한 6자리 종목코드로 정규화 실패: ticker={raw!r}, code={code!r}")
+        return None
+
+    code, name = resolved
 
     if fdr is None:
         print("[load_stock_snapshot] FinanceDataReader 미설치 → None 반환")
         return None
 
-    # 1) 종목 리스트 (이름, 시가총액, 시총 순위 계산용)
-    try:
-        stocks = fdr.StockListing("KRX")
-    except Exception as e:
-        print(f"[load_stock_snapshot] StockListing 조회 오류: {e}")
-        return None
-
-    row_df = stocks[stocks["Code"] == code]
-    if row_df.empty:
-        row_df = stocks[stocks["Name"] == ticker]
-        if row_df.empty:
-            print(f"[load_stock_snapshot] 종목 리스트에서 {ticker} 를 찾지 못함")
-            return None
-
-    row = row_df.iloc[0]
-
-    name = str(row.get("Name", code))
-
-    # 시가총액
-    marcap_val = row.get("Marcap")
-    try:
-        market_cap = int(marcap_val) if marcap_val is not None else None
-    except Exception:
-        market_cap = None
-
-    # 시총 순위
-    try:
-        stocks_sorted = stocks.sort_values("Marcap", ascending=False).reset_index(drop=True)
-        idx = stocks_sorted[stocks_sorted["Code"] == code].index
-        market_cap_rank = int(idx[0] + 1) if len(idx) > 0 else None
-    except Exception:
-        market_cap_rank = None
-
-    # 2) 가격/수익률 계산용 1년 데이터
     try:
         end = datetime.today()
         start = end - timedelta(days=365)
@@ -413,8 +378,8 @@ def load_stock_snapshot(ticker: str) -> Optional[Dict[str, Any]]:
         "ticker": code,
         "name": name,
         "current_price": int(current_price),
-        "market_cap": market_cap,
-        "market_cap_rank": market_cap_rank,
+        "market_cap": None,
+        "market_cap_rank": None,
         "ret_1m": ret_1m,
         "ret_3m": ret_3m,
         "ret_1y": ret_1y,
@@ -424,7 +389,6 @@ def load_stock_snapshot(ticker: str) -> Optional[Dict[str, Any]]:
     }
 
     return snapshot
-
 
 # -------------------------------------------------------------------
 # 4) 1차 밸류에이션 지표: FDR StockSummary (있으면 사용)
@@ -436,6 +400,9 @@ def load_stock_metrics(ticker: str) -> Dict[str, Any]:
     - 이후 DART 보강 단계에서 실제 값 계산
     """
     code = normalize_ticker(ticker)
+    if not code or not code.isdigit() or len(code) != 6:
+        print(f"[load_stock_metrics] invalid ticker after normalize: {ticker!r} -> {code!r}")
+        return {"per": None, "pbr": None, "roe": None, "eps": None, "bps": None}
 
     if fdr is not None and hasattr(fdr, "StockSummary"):
         try:
@@ -484,6 +451,9 @@ def _enhance_metrics_with_dart_if_needed(
         return metrics, None, None
 
     code = normalize_ticker(ticker)
+    if not code or not code.isdigit() or len(code) != 6:
+        print(f"[DART] invalid ticker after normalize: {ticker!r} -> {code!r}")
+        return metrics, None, None
     print(f"[DART] FDR metrics 없음 → DART 재무제표로 재계산 시도 (ticker={code})")
 
     # 1) DART 재무제표 로딩
