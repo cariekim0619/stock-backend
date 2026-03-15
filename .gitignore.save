@@ -1,4 +1,4 @@
-.env
+ø.env
 __pycache__/
 *.pyc
 .vscode/
@@ -10,4 +10,3 @@ env
 .cache/
 **/.cache/
 *.json
-!data/glossary.json
