@@ -55,7 +55,7 @@ class ChatbotGlossary:
 
     def __init__(self):
         """Initialize"""
-        from app.service.chatbot_glossary.glossary_api import GlossaryAPI
+        from app.services.chatbot_glossary.glossary_api import GlossaryAPI
         self.glossary = GlossaryAPI()
 
         # Gemini (LLM) - RAG용
