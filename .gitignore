@@ -10,4 +10,4 @@ env
 .cache/
 **/.cache/
 *.json
-!data/glossary.json
+!app/services/chatbot_glossary/data/glossary.json
