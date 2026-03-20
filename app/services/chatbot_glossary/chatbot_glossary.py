@@ -30,6 +30,12 @@ class ChatbotGlossary:
     - format_not_found_for_kakao(): 검색 실패 카카오 응답
     """
 
+    # 카카오 simpleText 최대 글자 수를 고려한 안전 길이
+    # 보수적으로 700자 내외를 목표로 생성하고
+    # 마지막 후처리에서는 900자 기준으로 한 번 더 잘라줍니다.
+    MAX_PROMPT_RESPONSE_CHARS = 700
+    MAX_FINAL_RESPONSE_CHARS = 900
+
     # 기획안 카테고리별 대표 용어
     CATEGORIES = {
         "지표 · 숫자 용어": [
@@ -85,12 +91,16 @@ class ChatbotGlossary:
             {
                 "status": "found" | "multiple" | "not_found",
                 "term": "PER",                  # found인 경우
-                "explanation": "⬛️ PER...",     # found인 경우
+                "explanation": "📖 PER...",     # found인 경우
                 "kb_data": {...},               # found인 경우 원본 KB 데이터
                 "candidates": [...],            # multiple인 경우
             }
         """
         query = user_input.strip()
+
+        # 빈 입력 방지
+        if not query:
+            return {"status": "not_found"}
 
         # 1. 정확 검색
         entry = self.glossary.lookup(query)
@@ -149,6 +159,52 @@ class ChatbotGlossary:
         return self.CATEGORIES.get(category_name)
 
     # ========================================
+    # 공통 유틸
+    # ========================================
+
+    def _safe_truncate_text(self, text: str, max_len: int = None) -> str:
+        """
+        카카오톡 메시지 길이 초과 방지용 후처리
+        너무 길면 잘라서 말줄임 처리
+        """
+        if max_len is None:
+            max_len = self.MAX_FINAL_RESPONSE_CHARS
+
+        if not text:
+            return text
+
+        if len(text) <= max_len:
+            return text
+
+        # 너무 길면 자연스럽게 잘라내기
+        trimmed = text[:max_len].rstrip()
+
+        # 마지막 줄이 어중간하게 끊기면 정리
+        if "\n" in trimmed:
+            last_newline = trimmed.rfind("\n")
+            if last_newline > max_len - 80:
+                trimmed = trimmed[:last_newline].rstrip()
+
+        return trimmed + "\n..."
+
+    def _clean_llm_text(self, text: str) -> str:
+        """
+        LLM 응답 후처리
+        - markdown bold 제거
+        - 불필요한 공백 정리
+        """
+        if not text:
+            return text
+
+        # markdown bold 제거
+        text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+
+        # 줄 끝 공백 제거
+        text = "\n".join(line.rstrip() for line in text.splitlines())
+
+        return text.strip()
+
+    # ========================================
     # RAG: 용어 설명 생성
     # ========================================
 
@@ -157,7 +213,7 @@ class ChatbotGlossary:
         KB 데이터 → 기획안 고정 포맷으로 변환 (RAG)
 
         출력 포맷:
-        ⬛️ [용어명]
+        📖 [용어명]에 대한 설명이에요.
 
         ➊ 정의
         - ...
@@ -178,9 +234,9 @@ class ChatbotGlossary:
         if self.genai:
             result = self._rag_explanation(entry)
             if result:
-                return result
+                return self._safe_truncate_text(result)
 
-        return self._fallback_explanation(entry)
+        return self._safe_truncate_text(self._fallback_explanation(entry))
 
     def _rag_explanation(self, entry: Dict) -> Optional[str]:
         """LLM 기반 RAG 설명 생성"""
@@ -197,10 +253,13 @@ class ChatbotGlossary:
         if full_name and full_name != term:
             kb_text += f" ({full_name})"
         kb_text += f"\n정의: {description}"
+
         if formula:
             kb_text += f"\n공식: {formula}"
+
         if example:
             kb_text += f"\n예시: {example}"
+
         if interpretation:
             kb_text += "\n해석:"
             for k, v in interpretation.items():
@@ -221,7 +280,7 @@ class ChatbotGlossary:
         rt_1 = related_terms[0] if len(related_terms) > 0 else "A"
         rt_2 = related_terms[1] if len(related_terms) > 1 else "B"
 
-        prompt = f"""아래 용어 사전 데이터를 바탕으로, 주식 초보자도 이해할 수 있는 설명을 작성해주세요.
+        prompt = f"""아래 용어 사전 데이터를 바탕으로 주식 초보자도 이해할 수 있는 설명을 작성해주세요.
 
 [용어 사전 데이터]
 {kb_text}
@@ -248,34 +307,43 @@ class ChatbotGlossary:
 
 [규칙]
 - 위에 제공된 용어 사전 데이터만 근거로 작성하세요
+- 새로운 정의를 만들지 마세요
 - 투자 판단이나 의견을 제시하지 마세요
 - 쉽고 친근한 말투를 사용하세요
-- 각 항목은 1~2문장으로 간결하게 작성하세요"""
+- 각 항목은 1~2문장으로 간결하게 작성하세요
+- 전체 답변은 {self.MAX_PROMPT_RESPONSE_CHARS}자 이내로 작성하세요
+- 카카오톡 메시지 길이 제한을 고려하여 불필요하게 길게 쓰지 마세요"""
 
         try:
             model = self.genai.GenerativeModel(
-                'gemini-2.5-flash',
+                "gemini-2.5-flash",
                 system_instruction=(
                     "당신은 주식 용어 사전 도우미입니다. "
                     "검증된 용어 데이터를 바탕으로 초보자에게 쉽게 설명합니다. "
-                    "새로운 정의를 만들거나 투자 판단을 제시하지 않습니다."
+                    "새로운 정의를 만들거나 투자 판단을 제시하지 않습니다. "
+                    f"전체 답변은 반드시 {self.MAX_PROMPT_RESPONSE_CHARS}자 이내로 작성합니다. "
+                    "출력 형식은 ➊정의 ➋언제 쓰이나요 ➌예시 ➍주의할 점 ➎헷갈리기 쉬운 용어 형식을 유지합니다."
                 )
             )
+
             response = model.generate_content(
                 prompt,
-                generation_config={"temperature": 0.2, "max_output_tokens": 1024}
+                generation_config={
+                    "temperature": 0.2,
+                    "max_output_tokens": 512,
+                }
             )
 
-            text = response.text.strip()
-            # 마크다운 bold 제거
-            text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+            text = self._clean_llm_text(response.text)
 
-            # 포맷 검증: ➊~➋ 있는지
-            if '➊' in text and '➋' in text:
+            # 포맷 검증
+            if "➊" in text and "➋" in text:
                 display_name = term
                 if full_name and full_name != term:
                     display_name = f"{term} ({full_name})"
-                return f"📖 {display_name}에 대한 설명이에요.\n\n{text}"
+
+                final_text = f"📖 {display_name}에 대한 설명이에요.\n\n{text}"
+                return self._safe_truncate_text(final_text)
 
             return None
 
@@ -310,11 +378,14 @@ class ChatbotGlossary:
             if key in interpretation:
                 usage = interpretation[key]
                 break
+
         if not usage and interpretation:
             first_key = list(interpretation.keys())[0]
             usage = interpretation[first_key]
+
         if not usage:
             usage = f"{term}은(는) 주식 분석에서 자주 사용되는 용어입니다."
+
         text += f"➋ 언제 쓰이나요 ?\n- {usage}\n\n"
 
         # ➌ 예시
@@ -329,8 +400,10 @@ class ChatbotGlossary:
             if key in interpretation:
                 caution = interpretation[key]
                 break
+
         if not caution:
             caution = "업종이나 시장 상황에 따라 해석이 달라질 수 있어요."
+
         text += f"➍ 주의할 점\n- {caution}\n\n"
 
         # ➎ 헷갈리기 쉬운 용어
@@ -351,7 +424,7 @@ class ChatbotGlossary:
     def _extract_term_from_sentence(self, sentence: str) -> Optional[str]:
         """문장에서 핵심 용어 추출"""
         # 1. 영문 약어 추출 (PER, RSI 등)
-        eng_matches = re.findall(r'[A-Za-z]{2,}', sentence)
+        eng_matches = re.findall(r"[A-Za-z]{2,}", sentence)
         for m in eng_matches:
             if self.glossary.lookup(m):
                 return m
@@ -365,7 +438,7 @@ class ChatbotGlossary:
         # 3. LLM 추출
         if self.genai:
             try:
-                model = self.genai.GenerativeModel('gemini-2.5-flash')
+                model = self.genai.GenerativeModel("gemini-2.5-flash")
                 prompt = (
                     "다음 문장에서 주식 관련 핵심 용어 1개만 추출하세요. "
                     "용어만 출력하세요.\n\n"
@@ -490,12 +563,12 @@ class ChatbotGlossary:
                 "outputs": [{
                     "simpleText": {
                         "text": (
-                                f"📖 {display_category} 중\n"
-                                "어떤 개념이 궁금하신가요?\n\n"
-                                "하단에 6개의 예시 단어가 있어요.\n"
-                                "버튼을 눌러 용어를 확인하거나,\n"
-                                "용어를 직접 입력해주세요 !"
-                            )
+                            f"📖 {display_category} 중\n"
+                            "어떤 개념이 궁금하신가요?\n\n"
+                            "하단에 6개의 예시 단어가 있어요.\n"
+                            "버튼을 눌러 용어를 확인하거나,\n"
+                            "용어를 직접 입력해주세요 !"
+                        )
                     }
                 }],
                 "quickReplies": quick_replies,
@@ -513,7 +586,7 @@ class ChatbotGlossary:
             "template": {
                 "outputs": [{
                     "simpleText": {
-                        "text": result["explanation"]
+                        "text": self._safe_truncate_text(result["explanation"])
                     }
                 }],
                 "quickReplies": [
