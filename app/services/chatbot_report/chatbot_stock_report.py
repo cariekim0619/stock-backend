@@ -50,7 +50,7 @@ class ChatbotStockReport:
     def __init__(self):
         """Initialize"""
         # 기존 데이터 프로바이더
-        from stock_chart_data import StockChartDataProvider
+        from app.services.chatbot_report.stock_chart_data import StockChartDataProvider
         self.chart_provider = StockChartDataProvider()
 
         # Gemini (LLM)
