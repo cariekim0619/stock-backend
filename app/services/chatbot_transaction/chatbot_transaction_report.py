@@ -24,16 +24,18 @@ class ChatbotTransactionReport:
 
     기능:
     - get_transaction_report(): 거래내역 + 요약 리포트 (말풍선 1+2)
-    - format_report_for_kakao(): 카카오톡 API 2.0 형식 변환
+    - format_entry_for_kakao(): 계좌 연동 시 기능 진입 화면
     - format_account_not_linked_kakao(): 계좌 미연동 응답
+    - format_stock_not_found_for_kakao(): 종목 매칭 실패 응답
     - format_no_transaction_kakao(): 거래내역 없음 응답
+    - format_report_for_kakao(): 카카오톡 API 2.0 형식 변환 (말풍선 1+2+버튼)
     """
 
     DEFAULT_PERIOD_DAYS = 30
 
     def __init__(self):
         """Initialize"""
-        from app.services.chatbot_report.HantuStock import HantuStock
+        from HantuStock import HantuStock
         self.hantu = HantuStock()
 
         # Gemini (LLM) - RAG 해설용
@@ -306,6 +308,54 @@ class ChatbotTransactionReport:
     # 카카오톡 포맷
     # ========================================
 
+    def format_entry_for_kakao(self) -> Dict:
+        """
+        계좌 연동 시 기능 진입 화면
+
+        기획: 보유 종목 확인 퀵 버튼 포함, 종목명 직접 입력 유도
+        """
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [{
+                    "simpleText": {
+                        "text": "📑 거래내역 / 요약 리포트 기능이에요\n\n어떤 종목에 대한 거래내역을 설명해드릴까요 ?\n\n보유 종목을 확인하려면,\n하단의 [보유 종목 확인] 버튼을 눌러 확인 후 종목명을 입력해 주세요."
+                    }
+                }],
+                "quickReplies": [
+                    {
+                        "action": "block",
+                        "label": "보유 종목 확인",
+                        "messageText": "보유 종목 확인",
+                        "blockId": "holding_list_block",
+                    },
+                ],
+            },
+        }
+
+    def format_stock_not_found_for_kakao(self) -> Dict:
+        """
+        종목 매칭 실패 시 카카오톡 응답
+        """
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [{
+                    "simpleText": {
+                        "text": "⚠️ 입력하신 종목을 찾지 못했어요.\n\n종목명을 다시 입력해 주세요"
+                    }
+                }],
+                "quickReplies": [
+                    {
+                        "action": "block",
+                        "label": "메인으로",
+                        "messageText": "메인으로",
+                        "blockId": "main_block",
+                    },
+                ],
+            },
+        }
+
     def format_report_for_kakao(self, report: Dict) -> Dict:
         """
         거래내역 리포트를 카카오톡 API 2.0 형식으로 변환
@@ -313,7 +363,8 @@ class ChatbotTransactionReport:
         기획:
         - 말풍선 1: 거래내역 요약
         - 말풍선 2: 거래 패턴 해설 (RAG)
-        - 퀵 버튼: 웹 상세 리포트 / 다른 종목 / 기본 화면 / 종료
+        - 말풍선 3: 웹 상세 리포트 버튼 (basicCard)
+        - 퀵 버튼: 다른 종목 보기 / 종료
         """
         if report.get("no_transaction"):
             return self.format_no_transaction_kakao(
@@ -335,7 +386,7 @@ class ChatbotTransactionReport:
         profit = summary.get("realized_profit", 0)
         profit_sign = "+" if profit >= 0 else ""
 
-        message_1 = f"⬛️ {company} 거래내역 요약이에요!\n\n"
+        message_1 = f"📑 {company} 거래내역 요약이에요!\n\n"
         message_1 += f"• 거래 기간 : 최근{period_days}일\n"
         message_1 += f"• 거래 횟수 : 총{summary.get('total_trades', 0)}회"
         message_1 += f" (매수{summary.get('buy_trades', 0)}회/ 매도{summary.get('sell_trades', 0)}회)\n"
@@ -347,7 +398,7 @@ class ChatbotTransactionReport:
             message_1 = f"최근 30일 동안의 거래내역은 없지만,\n최근 {period_days}일 동안 거래한 내역이 있어요.\n\n이 거래내역을 기준으로\n요약 리포트를 작성해드릴게요 !\n잠시만 기다려주세요!\n\n{message_1}"
 
         # 말풍선 2: 거래 패턴 해설 (RAG)
-        message_2 = "⬛️ 요약 리포트\n\n"
+        message_2 = "📑 요약 리포트\n\n"
         message_2 += f"➊ 거래 흐름\n- {rag.get('flow', '분석 중이에요.')}\n\n"
         message_2 += f"➋ 매매 패턴\n- {rag.get('pattern', '분석 중이에요.')}\n\n"
         message_2 += f"➌ 체크 포인트\n- {rag.get('checkpoint', '분석 중이에요.')}"
@@ -358,24 +409,24 @@ class ChatbotTransactionReport:
                 "outputs": [
                     {"simpleText": {"text": message_1}},
                     {"simpleText": {"text": message_2}},
+                    {
+                        "basicCard": {
+                            "buttons": [
+                                {
+                                    "action": "webLink",
+                                    "label": "웹에서 상세 리포트 보기",
+                                    "webLinkUrl": web_url,
+                                }
+                            ]
+                        }
+                    },
                 ],
                 "quickReplies": [
-                    {
-                        "action": "webLink",
-                        "label": "웹에서 상세 리포트 보기",
-                        "webLinkUrl": web_url,
-                    },
                     {
                         "action": "block",
                         "label": "다른 종목 보기",
                         "messageText": "다른 종목",
                         "blockId": "select_stock_block",
-                    },
-                    {
-                        "action": "block",
-                        "label": "기본 화면으로",
-                        "messageText": "메인으로",
-                        "blockId": "main_block",
                     },
                     {
                         "action": "block",
@@ -398,7 +449,7 @@ class ChatbotTransactionReport:
             "template": {
                 "outputs": [{
                     "simpleText": {
-                        "text": "⬛️ 거래내역 / 요약 리포트는\n계좌 연결 후 이용할 수 있어요 :)\n\n계좌를 연결하시면,\n최근 거래내역을 기반으로 종목별 리포트를 바로 제공해드릴게요 !"
+                        "text": "📑 거래내역 / 요약 리포트는\n계좌 연결 후 이용할 수 있어요 :)\n\n계좌를 연결하시면,\n최근 거래내역을 기반으로 종목별 리포트를 바로 제공해드릴게요 !"
                     }
                 }],
                 "quickReplies": [
@@ -427,19 +478,13 @@ class ChatbotTransactionReport:
             "template": {
                 "outputs": [{
                     "simpleText": {
-                        "text": f"최근30일 동안\n{company_name} 거래내역이 없어요.\n\n다른 종목을 입력해 주시겠어요?"
+                        "text": f"⚠️ 최근 30일 동안\n{company_name}의 거래내역이 없어요.\n\n다른 종목을 입력해주세요."
                     }
                 }],
                 "quickReplies": [
                     {
                         "action": "block",
-                        "label": "다른 종목 입력",
-                        "messageText": "다른 종목",
-                        "blockId": "select_stock_block",
-                    },
-                    {
-                        "action": "block",
-                        "label": "기본 화면으로",
+                        "label": "메인으로",
                         "messageText": "메인으로",
                         "blockId": "main_block",
                     },
