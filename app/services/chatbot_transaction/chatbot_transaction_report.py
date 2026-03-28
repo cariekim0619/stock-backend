@@ -35,7 +35,7 @@ class ChatbotTransactionReport:
 
     def __init__(self):
         """Initialize"""
-        from HantuStock import HantuStock
+        from app.services.chatbot_report.HantuStock import HantuStock
         self.hantu = HantuStock()
 
         # Gemini (LLM) - RAG 해설용
