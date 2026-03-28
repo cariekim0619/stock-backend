@@ -6,14 +6,13 @@ Chatbot_02 종목 리포트 API
 - 리포트 요약 (1차) → 주제별 상세 (2차) 순서
 - 5개 섹션: 투자 요약, 주가 동향, 재무 분석, 밸류에이션, 투자 의견
 - 계좌 미연동 시에도 종목 검색 가능
-- Agent RAG 적용 예정 (현재는 순차 호출 방식)
+- Agent React 적용 예정 (현재는 순차 호출 방식)
 """
 
 import os
 from typing import Dict, List, Optional
 from datetime import datetime
 from dotenv import load_dotenv
-from app.utils.gemini_compat import GeminiCompatClient
 
 load_dotenv()
 
@@ -23,10 +22,20 @@ class ChatbotStockReport:
     Chatbot_02 종목 리포트 데이터 프로바이더
 
     기능:
+    - get_price_info(): 현재가·등락 단독 조회 (캐시 리포트 갱신용)
     - get_report_summary(): 종목 리포트 요약 (1차 결과)
     - get_section_detail(): 주제별 상세 조회
-    - get_all_sections(): 전체 확인하기 (압축)
-    - format_*_for_kakao(): 카카오톡 API 2.0 형식 변환
+    - get_all_sections(): 전체 확인 (내부용)
+    - format_entry_for_kakao(): 기능 진입 화면
+    - format_no_account_for_kakao(): 계좌 미연동 안내
+    - format_stock_list_for_kakao(): 관심/보유 종목 리스트 출력
+    - format_empty_list_for_kakao(): 빈 목록 안내
+    - format_stock_not_in_list_for_kakao(): 목록에 없는 종목 입력 안내
+    - format_input_prompt_for_kakao(): 종목 직접 입력 유도
+    - format_stock_not_found_for_kakao(): 종목 찾기 실패 안내
+    - format_summary_for_kakao(): 리포트 요약 → 카카오톡 형식
+    - format_topic_menu_for_kakao(): 주제 선택 메뉴
+    - format_section_for_kakao(): 주제별 상세 → 카카오톡 형식
     """
 
     # 섹션 정의
@@ -41,19 +50,21 @@ class ChatbotStockReport:
     def __init__(self):
         """Initialize"""
         # 기존 데이터 프로바이더
-        from app.services.chatbot_report.stock_chart_data import StockChartDataProvider
+        from stock_chart_data import StockChartDataProvider
         self.chart_provider = StockChartDataProvider()
 
         # Gemini (LLM)
         self.gemini_key = os.environ.get("GEMINI_API_KEY")
         if self.gemini_key:
             try:
-                self.genai = GeminiCompatClient(self.gemini_key)
-            except Exception as e:
-                print(f"Warning: Gemini 초기화 실패 - {e}")
+                import google.generativeai as genai
+                genai.configure(api_key=self.gemini_key)
+                self.genai = genai
+            except ImportError:
                 self.genai = None
         else:
             self.genai = None
+
 
     # ========================================
     # 데이터 수집
@@ -91,15 +102,13 @@ class ChatbotStockReport:
         return data
 
     def _calculate_returns(self, symbol: str) -> Dict:
-        """기간별 수익률 계산"""
+        """기간별 수익률 계산 (chart_provider FDR 캐시 활용)"""
         try:
-            import FinanceDataReader as fdr
-
-            df = fdr.DataReader(symbol)
+            df = self.chart_provider.get_historical_data(symbol)
             if df.empty:
                 return {"error": "데이터 없음"}
 
-            current = float(df['Close'].iloc[-1])
+            current = float(df['close'].iloc[-1])
 
             periods = {
                 "1m": 21,   # 약 1개월 영업일
@@ -110,7 +119,7 @@ class ChatbotStockReport:
             returns = {}
             for key, days in periods.items():
                 if len(df) > days:
-                    past_price = float(df['Close'].iloc[-days])
+                    past_price = float(df['close'].iloc[-days])
                     returns[key] = round((current - past_price) / past_price * 100, 1)
                 else:
                     returns[key] = None
@@ -374,6 +383,28 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
         }
 
     # ========================================
+    # 현재가 단독 조회 (캐시 리포트 갱신용)
+    # ========================================
+
+    def get_price_info(self, symbol: str) -> Dict:
+        """
+        현재가·등락 단독 조회
+
+        LLM 호출 없이 가격 데이터만 빠르게 반환.
+        백엔드에서 캐시된 리포트를 전달할 때 가격 필드만 갱신하는 용도.
+
+        Returns:
+            {"current_price": int, "price_change": int, "change_rate": float, "source": str}
+        """
+        info = self.chart_provider.get_stock_info(symbol)
+        return {
+            "current_price": info.get("current_price", 0),
+            "price_change":  info.get("price_change", 0),
+            "change_rate":   info.get("change_rate", 0),
+            "source":        info.get("source", ""),
+        }
+
+    # ========================================
     # 리포트 요약 (1차 결과)
     # ========================================
 
@@ -439,7 +470,7 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
                 **({
                     "debt_ratio": data.get("dart", {}).get("debt_ratio"),
                     "operating_cf": data.get("dart", {}).get("operating_cf"),
-                } if "error" not in data.get("dart", {"error": True}) else {}),                
+                } if "error" not in data.get("dart", {"error": True}) else {}),
             },
             "rsi_signal": rsi_signal,
             "investment_summary": summary_text,
@@ -623,7 +654,189 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
         }
 
     # ========================================
-    # 카카오톡 포맷
+    # 카카오톡 포맷 — 플로우 화면
+    # ========================================
+
+    def format_entry_for_kakao(self) -> Dict:
+        """
+        기능 진입 화면을 카카오톡 형식으로 변환
+
+        기획:
+        - 종목 리포트 기능 안내 메시지
+        - 퀵 버튼: 관심 종목 확인하기 / 보유 종목 확인하기 / 종목 직접 입력 / 종목 리포트 종료
+        """
+        message = """⬛️ 종목 리포트 기능에 대해 알려드릴게요
+
+➊ 관심 있는 종목의 투자 리포트를 확인할 수 있어요
+➋ 종목명을 직접 입력해서 바로 리포트를 볼 수도 있어요
+➌ 보유 종목과 관심 종목은 계좌가 연동되어 있을 때 확인할 수 있어요
+
+아래 버튼을 눌러 원하는 방법을 선택해 주세요!"""
+
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [{"simpleText": {"text": message}}],
+                "quickReplies": [
+                    {"action": "block", "label": "관심 종목 확인하기", "messageText": "관심 종목", "blockId": "favorite_list_block"},
+                    {"action": "block", "label": "보유 종목 확인하기", "messageText": "보유 종목", "blockId": "holding_list_block"},
+                    {"action": "block", "label": "종목 직접 입력", "messageText": "종목 직접 입력", "blockId": "stock_input_block"},
+                    {"action": "block", "label": "종목 리포트 종료", "messageText": "메인으로", "blockId": "main_block"},
+                ],
+            },
+        }
+
+    def format_no_account_for_kakao(self) -> Dict:
+        """
+        계좌 미연동 안내를 카카오톡 형식으로 변환
+
+        기획:
+        - 계좌 연결 안내 메시지
+        - 퀵 버튼: 계좌 연결하기 / 종목 직접 입력 / 이전으로
+        """
+        message = """해당 기능은 계좌 연결 후 이용할 수 있습니다 :)
+
+계좌를 연결하시면,
+보유 종목과 관심 종목의 리포트를 바로 확인할 수 있어요!
+
+💡 계좌를 연결하지 않아도
+종목명을 직접 입력하면 리포트를 확인할 수 있어요 :D"""
+
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [{"simpleText": {"text": message}}],
+                "quickReplies": [
+                    {"action": "block", "label": "계좌 연결하기", "messageText": "계좌 연결", "blockId": "account_link_block"},
+                    {"action": "block", "label": "종목 직접 입력", "messageText": "종목 직접 입력", "blockId": "stock_input_block"},
+                    {"action": "block", "label": "이전으로", "messageText": "이전", "blockId": "report_entry_block"},
+                ],
+            },
+        }
+
+    def format_stock_list_for_kakao(self, stocks: List[str], list_type: str = "favorite") -> Dict:
+        """
+        관심/보유 종목 리스트를 카카오톡 형식으로 변환
+
+        Args:
+            stocks: 종목명 리스트 (예: ["삼성전자", "SK하이닉스"])
+            list_type: "favorite"(관심 종목) 또는 "holding"(보유 종목)
+
+        기획:
+        - 종목 리스트 출력 후 종목명 입력 대기
+        """
+        list_label = "관심" if list_type == "favorite" else "보유"
+        stock_lines = "\n".join([f"- {s}" for s in stocks])
+
+        message = f"""(사용자 이름)님의 {list_label} 종목은 다음과 같아요.
+
+{stock_lines}
+
+어떤 종목의 리포트를 확인할까요?
+종목명을 입력해 주세요!"""
+
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [{"simpleText": {"text": message}}],
+            },
+        }
+
+    def format_empty_list_for_kakao(self, list_type: str = "favorite") -> Dict:
+        """
+        빈 종목 목록 안내를 카카오톡 형식으로 변환
+
+        Args:
+            list_type: "favorite"(관심 종목) 또는 "holding"(보유 종목)
+
+        기획:
+        - 목록이 비어 있을 때 직접 입력 유도
+        - 퀵 버튼: 종목 직접 입력 / 이전으로
+        """
+        if list_type == "favorite":
+            message = "등록된 관심 종목이 없어요.\n\n종목명을 직접 입력하거나 이전 화면으로 돌아가세요."
+        else:
+            message = "보유 중인 종목이 없어요.\n\n종목명을 직접 입력하거나 이전 화면으로 돌아가세요."
+
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [{"simpleText": {"text": message}}],
+                "quickReplies": [
+                    {"action": "block", "label": "종목 직접 입력", "messageText": "종목 직접 입력", "blockId": "stock_input_block"},
+                    {"action": "block", "label": "이전으로", "messageText": "이전", "blockId": "report_entry_block"},
+                ],
+            },
+        }
+
+    def format_stock_not_in_list_for_kakao(self) -> Dict:
+        """
+        목록에 없는 종목 입력 안내를 카카오톡 형식으로 변환
+
+        기획:
+        - 관심/보유 목록 표시 후 목록에 없는 종목명 입력 시
+        - 퀵 버튼: 다시 입력 / 종목 직접 입력 / 이전으로
+        """
+        message = """입력하신 종목은 목록에 없어요.
+
+종목명을 다시 입력하거나,
+종목을 직접 검색해 주세요."""
+
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [{"simpleText": {"text": message}}],
+                "quickReplies": [
+                    {"action": "message", "label": "다시 입력", "messageText": "다시 입력"},
+                    {"action": "block", "label": "종목 직접 입력", "messageText": "종목 직접 입력", "blockId": "stock_input_block"},
+                    {"action": "block", "label": "이전으로", "messageText": "이전", "blockId": "report_entry_block"},
+                ],
+            },
+        }
+
+    def format_input_prompt_for_kakao(self) -> Dict:
+        """
+        종목 직접 입력 유도 화면을 카카오톡 형식으로 변환
+
+        기획:
+        - 종목명 또는 종목 코드 입력 유도 메시지
+        """
+        message = """종목명을 직접 입력해 주세요.
+
+종목명 또는 종목 코드를 입력하시면
+리포트를 바로 확인하실 수 있어요!"""
+
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [{"simpleText": {"text": message}}],
+            },
+        }
+
+    def format_stock_not_found_for_kakao(self) -> Dict:
+        """
+        종목 찾기 실패 안내를 카카오톡 형식으로 변환
+
+        기획:
+        - 종목명 또는 종목 코드로 매칭 실패 시
+        - 퀵 버튼: 다시 입력 / 이전으로
+        """
+        message = """입력하신 종목을 찾지 못했어요.
+종목명을 다시 입력해 주세요!"""
+
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [{"simpleText": {"text": message}}],
+                "quickReplies": [
+                    {"action": "message", "label": "다시 입력", "messageText": "다시 입력"},
+                    {"action": "block", "label": "이전으로", "messageText": "이전", "blockId": "report_entry_block"},
+                ],
+            },
+        }
+
+    # ========================================
+    # 카카오톡 포맷 — 리포트
     # ========================================
 
     def format_summary_for_kakao(self, summary: Dict) -> Dict:
@@ -649,12 +862,15 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
 
         # 가격 포맷
         price_str = f"{price:,.0f}" if price else "N/A"
-        change_str = f"{change:+,.0f}" if change else ""
+        if change != 0:
+            change_display = f"({change:+,.0f}원)"
+        else:
+            change_display = "(변동없음)"
         return_str = f"{return_1y:+.1f}%" if return_1y is not None else "N/A"
 
         message = f"""⬛️ {company}({symbol}) 종목 리포트 요약이에요!
 
-• 현재가 : {price_str}원 ({change_str}원)
+• 현재가 : {price_str}원 {change_display}
 • 1년 수익률 : {return_str}
 • 주요 지표 : PER {metrics.get('per', 'N/A')} / PBR {metrics.get('pbr', 'N/A')} / ROE {metrics.get('roe', 'N/A')}
 • 기술적 지표(RSI) : {rsi}
@@ -680,9 +896,10 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
                                     "webLinkUrl": web_url,
                                 },
                                 {
-                                    "action": "webLink",
-                                    "label": "종목 상세 페이지로 이동",
-                                    "webLinkUrl": f"https://jutopia.com/stock/{symbol}",
+                                    "action": "block",
+                                    "label": "관심 종목 등록",
+                                    "messageText": "관심 종목 등록",
+                                    "blockId": "add_favorite_block",
                                 },
                             ],
                         }
@@ -717,7 +934,7 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
 
         기획:
         - 5개 주제 안내 메시지
-        - 퀵 버튼: 5개 주제 + 전체 확인 + 이전으로
+        - 퀵 버튼: 5개 주제 + 이전으로
         """
         message = """종목 리포트는
 아래 5개의 주제로 나누어 확인할 수 있어요.
@@ -740,7 +957,7 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
                     {"action": "block", "label": "재무 분석", "messageText": "재무 분석", "blockId": "section_detail_block"},
                     {"action": "block", "label": "밸류에이션", "messageText": "밸류에이션", "blockId": "section_detail_block"},
                     {"action": "block", "label": "투자 의견", "messageText": "투자 의견", "blockId": "section_detail_block"},
-                    {"action": "block", "label": "전체 확인하기", "messageText": "전체 확인", "blockId": "all_sections_block"},
+                    {"action": "block", "label": "관심 종목 등록", "messageText": "관심 종목 등록", "blockId": "add_favorite_block"},
                     {"action": "block", "label": "이전으로", "messageText": "이전", "blockId": "report_summary_block"},
                 ],
             },
@@ -769,12 +986,8 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
             "template": {
                 "outputs": [{"simpleText": {"text": message}}],
                 "quickReplies": [
-                    {"action": "block", "label": "투자 요약", "messageText": "투자 요약", "blockId": "section_detail_block"},
-                    {"action": "block", "label": "주가 동향", "messageText": "주가 동향", "blockId": "section_detail_block"},
-                    {"action": "block", "label": "재무 분석", "messageText": "재무 분석", "blockId": "section_detail_block"},
-                    {"action": "block", "label": "밸류에이션", "messageText": "밸류에이션", "blockId": "section_detail_block"},
-                    {"action": "block", "label": "투자 의견", "messageText": "투자 의견", "blockId": "section_detail_block"},
-                    {"action": "block", "label": "전체 확인하기", "messageText": "전체 확인", "blockId": "all_sections_block"},
+                    {"action": "block", "label": "주제별 요약 보기", "messageText": "주제별 요약", "blockId": "topic_menu_block"},
+                    {"action": "block", "label": "관심 종목 등록", "messageText": "관심 종목 등록", "blockId": "add_favorite_block"},
                     {"action": "block", "label": "다른 종목 보기", "messageText": "다른 종목", "blockId": "select_stock_block"},
                     {"action": "block", "label": "종목 리포트 종료", "messageText": "메인으로", "blockId": "main_block"},
                 ],

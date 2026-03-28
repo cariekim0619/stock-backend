@@ -1,13 +1,17 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from typing import Optional, List
 
 from app.services.report_service import generate_report
 from app.services.chatbot_report.chatbot_stock_report import ChatbotStockReport
 
 # (선택) 티커 정규화 유틸이 있으면 사용
 try:
-    from app.utils.ticker_normalizer import normalize_ticker, resolve_symbol_and_name, get_company_name_by_symbol
+    from app.utils.ticker_normalizer import (
+        normalize_ticker,
+        resolve_symbol_and_name,
+        get_company_name_by_symbol,
+    )
 except Exception:
     normalize_ticker = None
     resolve_symbol_and_name = None
@@ -49,115 +53,15 @@ def get_report(request: ReportRequest):
 class ChatbotReportRequest(BaseModel):
     mode: str
     ticker: Optional[str] = ""
-    uuid: Optional[str] = ""             # 현재는 사용 안 해도 됨
+    uuid: Optional[str] = ""          # 현재 미사용
     section: Optional[str] = ""
-    user_name: Optional[str] = "사용자"  # watchlist/holdings 출력용
-    list_type: Optional[str] = ""        # stock_list/no_stocks용
-    stocks: Optional[List[str]] = None   # watchlist/holdings 목록을 서버가 받는 방식이면 사용
+    user_name: Optional[str] = "사용자"   # 현재 chatbot_stock_report.py에서는 실제 사용 안 함
+    list_type: Optional[str] = ""
+    stocks: Optional[List[str]] = None
 
 
 # ---------------------------
-# 3) Kakao simpleText 헬퍼 (고정 화면용)
-# ---------------------------
-
-def _kakao_simple(text: str, quicks: Optional[List[dict]] = None) -> dict:
-    payload = {
-        "version": "2.0",
-        "template": {
-            "outputs": [{"simpleText": {"text": text}}]
-        }
-    }
-    if quicks:
-        payload["template"]["quickReplies"] = quicks
-    return payload
-
-
-def _entry_screen() -> dict:
-    text = (
-        "⬛️ 종목 리포트 기능에 대해 알려드릴게요\n\n"
-        "➊ 관심 있는 종목의 투자 리포트를 확인할 수 있어요\n"
-        "➋ 종목명을 직접 입력해서 바로 리포트를 볼 수도 있어요\n"
-        "➌ 보유 종목과 관심 종목은 계좌가 연동되어 있을 때 확인할 수 있어요\n\n"
-        "아래 버튼을 눌러 원하는 방법을 선택해 주세요!"
-    )
-    quicks = [
-        {"action": "message", "label": "관심 종목 확인하기", "messageText": "관심 종목 확인하기"},
-        {"action": "message", "label": "보유 종목 확인하기", "messageText": "보유 종목 확인하기"},
-        {"action": "message", "label": "종목 직접 입력", "messageText": "종목 직접 입력"},
-        {"action": "message", "label": "종목 리포트 종료", "messageText": "종목 리포트 종료"},
-    ]
-    return _kakao_simple(text, quicks)
-
-
-def _account_required_screen() -> dict:
-    text = (
-        "해당 기능은 계좌 연결 후 이용할 수 있습니다 :)\n\n"
-        "계좌를 연결하시면,\n"
-        "보유 종목과 관심 종목의 리포트를 바로 확인할 수 있어요!\n\n"
-        "💡 계좌를 연결하지 않아도\n"
-        "종목명을 직접 입력하면 리포트를 확인할 수 있어요 :D"
-    )
-    quicks = [
-        {"action": "message", "label": "계좌 연결하기", "messageText": "주식계좌연결"},
-        {"action": "message", "label": "종목 직접 입력", "messageText": "종목 직접 입력"},
-        {"action": "message", "label": "이전으로", "messageText": "이전으로"},
-    ]
-    return _kakao_simple(text, quicks)
-
-
-def _stock_input_prompt_screen() -> dict:
-    return _kakao_simple("종목명 또는 종목 코드를 입력해 주세요!")
-
-
-def _stock_not_found_screen() -> dict:
-    return _kakao_simple("입력하신 종목을 찾지 못했어요.\n종목명을 다시 입력해 주세요!")
-
-
-def _stock_list_screen(user_name: str, list_type: str, stocks: List[str]) -> dict:
-    title = "관심 종목" if list_type == "watchlist" else "보유 종목"
-    lines = "\n".join([f"- {s}" for s in stocks]) if stocks else ""
-    text = (
-        f"{user_name}님의 {title}은 다음과 같아요.\n\n"
-        f"{lines}\n\n"
-        "어떤 종목의 리포트를 확인할까요?\n"
-        "종목명을 입력해 주세요!"
-    )
-    return _kakao_simple(text)
-
-
-def _no_stocks_screen(user_name: str, list_type: str) -> dict:
-    if list_type == "holdings":
-        text = (
-            f"{user_name}님의 보유 종목이 없어요.\n\n"
-            "보유 종목에 대한 종목 리포트를 확인하려면,\n"
-            "종목을 매수 후 다시 이용해주세요.\n\n"
-            "관심 종목이 있다면 하단의 관심 종목 버튼을 눌러\n"
-            "종목 리포트를 확인하세요 !"
-        )
-        quicks = [
-            {"action": "message", "label": "관심 종목 확인하기", "messageText": "관심 종목 확인하기"},
-            {"action": "message", "label": "종목 직접 입력", "messageText": "종목 직접 입력"},
-            {"action": "message", "label": "메인으로", "messageText": "메인으로"},
-        ]
-        return _kakao_simple(text, quicks)
-
-    # watchlist
-    text = (
-        f"{user_name}님의 관심 종목이 없어요.\n\n"
-        "관심 종목이 있는 경우,\n"
-        "해당 종목을 관심 종목으로 등록한 후\n"
-        "다시 이용해주세요."
-    )
-    quicks = [
-        {"action": "message", "label": "보유 종목 확인하기", "messageText": "보유 종목 확인하기"},
-        {"action": "message", "label": "종목 직접 입력", "messageText": "종목 직접 입력"},
-        {"action": "message", "label": "메인으로", "messageText": "메인으로"},
-    ]
-    return _kakao_simple(text, quicks)
-
-
-# ---------------------------
-# 4) symbol / company_name / section 매핑 유틸
+# 3) symbol / company_name / section 매핑 유틸
 # ---------------------------
 
 def _normalize_symbol(ticker: str) -> str:
@@ -181,15 +85,16 @@ def _normalize_symbol(ticker: str) -> str:
                 return normalized
         except Exception:
             pass
+
     return ""
 
 
 def _resolve_company_name(bot: ChatbotStockReport, symbol: str, fallback: str) -> str:
     """
     company_name을 최대한 정확히 뽑는다.
-    1) S3 stock universe cache 에서 code -> company_name 역조회
-    2) chart_provider.get_stock_info(symbol)에서 Name/종목명 탐색
-    3) 마지막 fallback
+    1) S3/캐시 역조회
+    2) chart_provider.get_stock_info(symbol)에서 추출
+    3) fallback
     """
     if get_company_name_by_symbol:
         try:
@@ -221,33 +126,46 @@ def _resolve_company_name(bot: ChatbotStockReport, symbol: str, fallback: str) -
 
 def _normalize_section_key(bot: ChatbotStockReport, section: str) -> str:
     """
-    section이 한국어(예: '재무 분석')로 들어오거나,
-    내부 키(예: 'financial_analysis')로 들어오는 걸 모두 처리
+    section이 한국어 라벨이든 내부 key든 모두 허용한다.
     """
     s = (section or "").strip()
     if not s:
         return ""
 
-    # 내부 키로 이미 들어온 경우
     if s in bot.SECTIONS:
         return s
 
-    # 한국어 라벨로 들어온 경우 -> 역매핑
-    inv = {v: k for k, v in bot.SECTIONS.items()}
-    if s in inv:
-        return inv[s]
+    inverse_map = {v: k for k, v in bot.SECTIONS.items()}
+    if s in inverse_map:
+        return inverse_map[s]
 
-    # 혹시 '투자 요약' 같은 공백/변형 케이스 처리
     s2 = s.replace(" ", "")
-    inv2 = {v.replace(" ", ""): k for k, v in bot.SECTIONS.items()}
-    if s2 in inv2:
-        return inv2[s2]
+    inverse_map_no_space = {v.replace(" ", ""): k for k, v in bot.SECTIONS.items()}
+    if s2 in inverse_map_no_space:
+        return inverse_map_no_space[s2]
 
     return ""
 
 
+def _to_bot_list_type(value: str) -> str:
+    """
+    chatbot_stock_report.py 기준으로 변환
+    - favorite
+    - holding
+
+    라우터/외부 요청에서 watchlist, holdings가 들어와도 허용
+    """
+    mapping = {
+        "watchlist": "favorite",
+        "favorite": "favorite",
+        "holdings": "holding",
+        "holding": "holding",
+    }
+    return mapping.get((value or "").strip(), "")
+
+
 # ---------------------------
-# 5) 챗봇 전용 엔드포인트 (정석 연결)
+# 4) 챗봇 전용 엔드포인트
 # ---------------------------
 
 @router.post("/chatbot/report")
@@ -255,95 +173,113 @@ def chatbot_report(req: ChatbotReportRequest):
     mode = (req.mode or "").strip()
     ticker = (req.ticker or "").strip()
     section = (req.section or "").strip()
-    user_name = (req.user_name or "사용자").strip() or "사용자"
     list_type = (req.list_type or "").strip()
     stocks = req.stocks or []
 
     bot = ChatbotStockReport()
 
-    # ---- 고정 화면: entry / 안내 ----
+    # ---- 고정 화면 ----
     if mode == "entry":
-        return _entry_screen()
+        return bot.format_entry_for_kakao()
 
     if mode == "account_required":
-        return _account_required_screen()
+        return bot.format_no_account_for_kakao()
 
     if mode == "stock_input_prompt":
-        return _stock_input_prompt_screen()
+        return bot.format_input_prompt_for_kakao()
 
     if mode == "stock_not_found":
-        return _stock_not_found_screen()
+        return bot.format_stock_not_found_for_kakao()
+
+    if mode == "stock_not_in_list":
+        return bot.format_stock_not_in_list_for_kakao()
 
     # ---- 관심/보유 목록 화면 ----
     if mode in ("watchlist", "holdings"):
-        lt = "watchlist" if mode == "watchlist" else "holdings"
+        bot_list_type = _to_bot_list_type(mode)
+
         if stocks:
-            return _stock_list_screen(user_name=user_name, list_type=lt, stocks=stocks)
-        return _no_stocks_screen(user_name=user_name, list_type=lt)
+            return bot.format_stock_list_for_kakao(stocks, bot_list_type)
+
+        return bot.format_empty_list_for_kakao(bot_list_type)
 
     if mode == "stock_list":
-        if list_type not in ("watchlist", "holdings"):
-            raise HTTPException(status_code=400, detail="list_type must be watchlist or holdings")
-        return _stock_list_screen(user_name=user_name, list_type=list_type, stocks=stocks)
+        bot_list_type = _to_bot_list_type(list_type)
+        if bot_list_type not in ("favorite", "holding"):
+            raise HTTPException(
+                status_code=400,
+                detail="list_type must be one of: watchlist, holdings, favorite, holding",
+            )
+        return bot.format_stock_list_for_kakao(stocks, bot_list_type)
 
     if mode == "no_stocks":
-        if list_type not in ("watchlist", "holdings"):
-            raise HTTPException(status_code=400, detail="list_type must be watchlist or holdings")
-        return _no_stocks_screen(user_name=user_name, list_type=list_type)
+        bot_list_type = _to_bot_list_type(list_type)
+        if bot_list_type not in ("favorite", "holding"):
+            raise HTTPException(
+                status_code=400,
+                detail="list_type must be one of: watchlist, holdings, favorite, holding",
+            )
+        return bot.format_empty_list_for_kakao(bot_list_type)
 
-    # ---- 정석 연결: summary ----
+    # ---- summary ----
     if mode == "summary":
         if not ticker:
-            return _stock_input_prompt_screen()
+            return bot.format_input_prompt_for_kakao()
 
         symbol = _normalize_symbol(ticker)
         if not symbol:
-            return _stock_not_found_screen()
+            return bot.format_stock_not_found_for_kakao()
 
         company_name = _resolve_company_name(bot, symbol, fallback="종목")
         summary_dict = bot.get_report_summary(symbol, company_name)
 
-        # get_report_summary가 에러 dict를 주면 에러 포맷으로 변환
         return bot.format_summary_for_kakao(summary_dict)
 
-    # ---- 정석 연결: topic_menu ----
+    # ---- topic_menu ----
     if mode == "topic_menu":
         return bot.format_topic_menu_for_kakao()
 
-    # ---- 정석 연결: section ----
+    # ---- section ----
     if mode == "section":
         if not ticker:
             raise HTTPException(status_code=400, detail="ticker is required for section")
 
         symbol = _normalize_symbol(ticker)
         if not symbol:
-            return _stock_not_found_screen()
+            return bot.format_stock_not_found_for_kakao()
 
         section_key = _normalize_section_key(bot, section)
         if not section_key:
             raise HTTPException(
                 status_code=400,
-                detail=f"invalid section. use one of: {list(bot.SECTIONS.keys())} or labels: {list(bot.SECTIONS.values())}"
+                detail=(
+                    f"invalid section. "
+                    f"use one of keys: {list(bot.SECTIONS.keys())} "
+                    f"or labels: {list(bot.SECTIONS.values())}"
+                ),
             )
 
         company_name = _resolve_company_name(bot, symbol, fallback="종목")
-
-        # section detail dict 생성 -> format dict
-        detail_dict = bot.get_section_detail(symbol, company_name, section_key, raw_data=None)
+        detail_dict = bot.get_section_detail(
+            symbol=symbol,
+            company_name=company_name,
+            section=section_key,
+            raw_data=None,
+        )
         return bot.format_section_for_kakao(detail_dict)
 
-    # ---- 정석 연결: all_sections ----
+    # ---- all_sections ----
     if mode == "all_sections":
         if not ticker:
             raise HTTPException(status_code=400, detail="ticker is required for all_sections")
 
         symbol = _normalize_symbol(ticker)
         if not symbol:
-            return _stock_not_found_screen()
+            return bot.format_stock_not_found_for_kakao()
 
         company_name = _resolve_company_name(bot, symbol, fallback="종목")
-
         all_sections_dict = bot.get_all_sections(symbol, company_name)
+
         return bot.format_all_sections_for_kakao(all_sections_dict)
 
     raise HTTPException(status_code=400, detail=f"unknown mode: {mode}")
