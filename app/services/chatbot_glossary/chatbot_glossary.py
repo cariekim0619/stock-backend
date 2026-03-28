@@ -231,12 +231,7 @@ class ChatbotGlossary:
         - A : ...
         - B : ...
         """
-        if self.genai:
-            result = self._rag_explanation(entry)
-            if result:
-                return self._safe_truncate_text(result)
-
-        return self._safe_truncate_text(self._fallback_explanation(entry))
+        return self._fallback_explanation(entry)
 
     def _rag_explanation(self, entry: Dict) -> Optional[str]:
         """LLM 기반 RAG 설명 생성"""

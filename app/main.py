@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.routers import report_router
 from app.routers import chatbot_news_community_router  # ✅ 기존 Chatbot_05
 from app.routers import glossary_router  # ✅ Chatbot_03 주식 용어 사전 라우터 추가
+from app.utils.ticker_normalizer import warm_stock_universe_cache
 
 # ✅ 앱 시작 시 .env를 한 번만 로드
 load_dotenv()
@@ -38,3 +39,11 @@ app.include_router(glossary_router.router)
 @app.get("/")
 def health_check():
     return {"status": "ok", "message": "backend is running"}
+
+@app.on_event("startup")
+def preload_stock_universe_cache():
+    try:
+        status = warm_stock_universe_cache()
+        print(f"[startup] stock universe ready: {status.get('item_count') or len(status.get('items') or [])} items")
+    except Exception as e:
+        print(f"[startup] stock universe warmup failed: {e}")
