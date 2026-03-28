@@ -665,7 +665,7 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
         - 종목 리포트 기능 안내 메시지
         - 퀵 버튼: 관심 종목 확인하기 / 보유 종목 확인하기 / 종목 직접 입력 / 종목 리포트 종료
         """
-        message = """⬛️ 종목 리포트 기능에 대해 알려드릴게요
+        message = """▪️ 종목 리포트 기능에 대해 알려드릴게요
 
 ➊ 관심 있는 종목의 투자 리포트를 확인할 수 있어요
 ➋ 종목명을 직접 입력해서 바로 리포트를 볼 수도 있어요
@@ -868,14 +868,14 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
             change_display = "(변동없음)"
         return_str = f"{return_1y:+.1f}%" if return_1y is not None else "N/A"
 
-        message = f"""⬛️ {company}({symbol}) 종목 리포트 요약이에요!
+        message = f"""▪️ {company}({symbol}) 종목 리포트 요약이에요!
 
 • 현재가 : {price_str}원 {change_display}
 • 1년 수익률 : {return_str}
 • 주요 지표 : PER {metrics.get('per', 'N/A')} / PBR {metrics.get('pbr', 'N/A')} / ROE {metrics.get('roe', 'N/A')}
 • 기술적 지표(RSI) : {rsi}
 
-⬛️ 투자 요약
+▪️ 투자 요약
 {invest_summary}"""
 
         web_url = summary.get("web_url", "https://jutopia.com")
@@ -1000,7 +1000,7 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
             points = content.get("points", [])
             checkpoint = content.get("checkpoint", "")
             points_text = "\n".join([f"• {p}" for p in points])
-            msg = f"⬛️ {section_name}이에요.\n\n{points_text}"
+            msg = f"▪️ {section_name}이에요.\n\n{points_text}"
             if checkpoint:
                 msg += f"\n\n✔️ {checkpoint}"
             return msg
@@ -1012,7 +1012,7 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
             r3m = returns.get("3m", "N/A")
             r1y = returns.get("1y", "N/A")
             interpretation = rsi.get("interpretation", "")
-            return f"""⬛️ 주가 동향을 살펴볼게요.
+            return f"""▪️ 주가 동향을 살펴볼게요.
 
 • 1개월 수익률: {r1m}%
 • 3개월 수익률: {r3m}%
@@ -1025,7 +1025,7 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
             points = content.get("points", [])
             checkpoint = content.get("checkpoint", "")
             points_text = "\n".join([f"• {p}" for p in points])
-            msg = f"⬛️ {section_name}이에요.\n\n{points_text}"
+            msg = f"▪️ {section_name}이에요.\n\n{points_text}"
             if checkpoint:
                 msg += f"\n\n✔️ {checkpoint}"
             return msg
@@ -1033,7 +1033,7 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
         elif section == "valuation":
             metrics = content.get("metrics", {})
             interpretation = content.get("interpretation", "")
-            return f"""⬛️ 밸류에이션 관점에서 보면,
+            return f"""▪️ 밸류에이션 관점에서 보면,
 
 • PER: {metrics.get('per', 'N/A')}
 • PBR: {metrics.get('pbr', 'N/A')}
@@ -1045,12 +1045,12 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
             points = content.get("points", [])
             risk_note = content.get("risk_note", "")
             points_text = "\n".join([f"• {p}" for p in points])
-            msg = f"⬛️ 종합 투자 의견이에요.\n\n{points_text}"
+            msg = f"▪️ 종합 투자 의견이에요.\n\n{points_text}"
             if risk_note:
                 msg += f"\n\n👉 {risk_note}"
             return msg
 
-        return f"⬛️ {section_name} 데이터를 준비 중이에요."
+        return f"▪️ {section_name} 데이터를 준비 중이에요."
 
     def format_all_sections_for_kakao(self, all_sections: Dict) -> Dict:
         """전체 확인하기를 카카오톡 형식으로 변환"""
@@ -1060,7 +1060,7 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
         company = all_sections.get("company_name", "종목")
         sections = all_sections.get("sections", {})
 
-        lines = [f"⬛️ {company} 종목 리포트 전체 요약이에요.\n"]
+        lines = [f"▪️ {company} 종목 리포트 전체 요약이에요.\n"]
 
         section_labels = {
             "investment_summary": "➊ 투자 요약",
