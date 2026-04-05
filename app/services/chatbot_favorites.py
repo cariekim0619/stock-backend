@@ -253,6 +253,28 @@ class ChatbotFavorites:
     # 추천 종목 (pykrx get_market_price_change 기반)
     # ========================================
 
+    def _find_recent_date_pairs(self, lookback_days: int = 14) -> List[Tuple[str, str]]:
+        """
+        최근 날짜들 중 (이전 날짜, 기준 날짜) 쌍을 생성
+
+        pykrx get_market_price_change()는
+        같은 날짜(start == end)로 호출 시 내부에서 실패할 수 있어
+        최소 2개 날짜 구간으로 조회합니다.
+        """
+        today = datetime.now()
+        dates = [
+            (today - timedelta(days=i)).strftime("%Y%m%d")
+            for i in range(lookback_days)
+        ]
+
+        # 오래된 날짜 -> 최신 날짜 순으로 정렬 후 인접 쌍 생성
+        dates = sorted(dates)
+        pairs = [(dates[i - 1], dates[i]) for i in range(1, len(dates))]
+
+        # 최신 구간부터 먼저 시도
+        pairs.reverse()
+        return pairs
+
     def _normalize_price_change_df(self, df):
         """
         pykrx get_market_price_change() 결과 컬럼을 표준화
@@ -312,13 +334,13 @@ class ChatbotFavorites:
 
     def _get_recent_market_price_change_dataframe(self):
         """
-        최근 영업일의 KOSPI + KOSDAQ 가격변동 데이터 반환
+        최근 유효한 (이전 날짜 ~ 기준 날짜) 구간의
+        KOSPI + KOSDAQ 가격변동 데이터를 반환
 
         핵심:
-        - get_market_ohlcv_by_ticker() 대신
-          get_market_price_change(start, end, market)를 사용
-        - 같은 날짜를 start/end로 넣어 당일 기준 데이터 확보
-        - 최근 7일 이내 영업일 탐색
+        - get_market_ohlcv_by_ticker() 사용 안 함
+        - get_market_price_change(prev_date, target_date, market) 사용
+        - 같은 날짜 조회로 인한 pykrx 내부 오류 회피
         """
         try:
             from pykrx import stock as pystock
@@ -327,16 +349,18 @@ class ChatbotFavorites:
             print(f"[WARN] pykrx import 실패: {e}")
             return None, None
 
-        today = datetime.now()
+        date_pairs = self._find_recent_date_pairs(lookback_days=14)
 
-        for i in range(7):
-            target_date = (today - timedelta(days=i)).strftime("%Y%m%d")
-
+        for prev_date, target_date in date_pairs:
             try:
                 frames = []
 
                 for market in ["KOSPI", "KOSDAQ"]:
-                    raw_df = pystock.get_market_price_change(target_date, target_date, market=market)
+                    try:
+                        raw_df = pystock.get_market_price_change(prev_date, target_date, market=market)
+                    except Exception as e:
+                        print(f"[WARN] 가격변동 조회 실패 ({market}, {prev_date}~{target_date}): {e}")
+                        continue
 
                     if raw_df is None or raw_df.empty:
                         continue
@@ -346,7 +370,7 @@ class ChatbotFavorites:
                         frames.append(normalized_df)
 
                 if not frames:
-                    print(f"[INFO] 최근 가격변동 데이터 없음: {target_date}")
+                    print(f"[INFO] 유효한 가격변동 데이터 없음: {prev_date} ~ {target_date}")
                     continue
 
                 df = pd.concat(frames)
@@ -356,7 +380,7 @@ class ChatbotFavorites:
                 return df, target_date
 
             except Exception as e:
-                print(f"[WARN] 최근 가격변동 데이터 조회 실패 ({target_date}): {e}")
+                print(f"[WARN] 최근 가격변동 데이터 통합 실패 ({prev_date}~{target_date}): {e}")
                 continue
 
         return None, None
@@ -376,7 +400,8 @@ class ChatbotFavorites:
             # NOTE:
             # 기존 구현은 get_market_ohlcv_by_ticker() 기반이었는데
             # 현재는 해당 경로가 깨진 상태로 보고 우회합니다.
-            # 따라서 추천 종목은 get_market_price_change() 결과만 사용합니다.
+            # 또한 get_market_price_change()도 같은 날짜 조회는 불안정하여
+            # 이전 날짜 ~ 기준 날짜 구간 조회만 사용합니다.
             df, target_date = self._get_recent_market_price_change_dataframe()
 
             if df is None or df.empty:
