@@ -256,165 +256,215 @@ class ChatbotFavorites:
     # 추천 종목 (pykrx 기반 거래량/상승률 TOP5)
     # ========================================
 
-    def _get_recent_market_dataframe(self):
-        """
-        최근 영업일의 KOSPI + KOSDAQ 데이터를 반환
-        휴장일/주말 대응을 위해 최근 7일 안에서 탐색
-        """
+def _get_recent_market_dataframe(self):
+    """
+    최근 영업일의 KOSPI + KOSDAQ 데이터를 반환
+    휴장일/주말/pykrx 예외 대응을 위해 최근 7일 안에서 탐색
+    """
+    from datetime import datetime, timedelta
+
+    try:
+        from pykrx import stock as pystock
+        import pandas as pd
+    except Exception as e:
+        print(f"[WARN] pykrx import 실패: {e}")
+        return None, None
+
+    today = datetime.now()
+
+    for i in range(7):
+        target_date = (today - timedelta(days=i)).strftime("%Y%m%d")
+
         try:
-            from pykrx import stock as pystock
-            import pandas as pd
+            df_kospi = pystock.get_market_ohlcv_by_ticker(target_date, market="KOSPI")
+            df_kosdaq = pystock.get_market_ohlcv_by_ticker(target_date, market="KOSDAQ")
 
-            today = datetime.now()
+            # 둘 다 비어 있으면 다음 날짜 시도
+            if (df_kospi is None or df_kospi.empty) and (df_kosdaq is None or df_kosdaq.empty):
+                print(f"[INFO] 최근 시장 데이터 없음: {target_date}")
+                continue
 
-            for i in range(7):
-                target_date = (today - timedelta(days=i)).strftime("%Y%m%d")
+            frames = []
+            if df_kospi is not None and not df_kospi.empty:
+                frames.append(df_kospi)
+            if df_kosdaq is not None and not df_kosdaq.empty:
+                frames.append(df_kosdaq)
 
-                df_kospi = pystock.get_market_ohlcv_by_ticker(target_date, market="KOSPI")
-                df_kosdaq = pystock.get_market_ohlcv_by_ticker(target_date, market="KOSDAQ")
+            if not frames:
+                continue
 
-                if not df_kospi.empty or not df_kosdaq.empty:
-                    df = pd.concat([df_kospi, df_kosdaq])
-                    return df, target_date
-
-            return None, None
-
-        except Exception as e:
-            print(f"[WARN] 최근 시장 데이터 조회 실패: {e}")
-            return None, None
-
-    def _get_previous_market_dataframe(self, base_date: str):
-        """
-        base_date 이전 최근 영업일 데이터 조회
-        """
-        try:
-            from pykrx import stock as pystock
-            import pandas as pd
-
-            base_dt = datetime.strptime(base_date, "%Y%m%d")
-
-            for i in range(1, 8):
-                target_date = (base_dt - timedelta(days=i)).strftime("%Y%m%d")
-
-                df_kospi = pystock.get_market_ohlcv_by_ticker(target_date, market="KOSPI")
-                df_kosdaq = pystock.get_market_ohlcv_by_ticker(target_date, market="KOSDAQ")
-
-                if not df_kospi.empty or not df_kosdaq.empty:
-                    df = pd.concat([df_kospi, df_kosdaq])
-                    return df, target_date
-
-            return None, None
-
-        except Exception as e:
-            print(f"[WARN] 이전 시장 데이터 조회 실패: {e}")
-            return None, None
-
-    def get_top_stocks(self, category: str = "volume") -> List[Dict]:
-        """
-        추천 종목 조회
-
-        Args:
-            category: "volume" (거래량 TOP5) | "return" (상승률 TOP5)
-
-        Returns:
-            [{"symbol": "...", "company_name": "...", "current_price": ..., "change_rate": ...}, ...]
-        """
-        try:
-            from pykrx import stock as pystock
-            import pandas as pd
-
-            df, target_date = self._get_recent_market_dataframe()
-
-            if df is None or df.empty:
-                print("[WARN] get_top_stocks: 최근 영업일 데이터를 찾지 못했습니다.")
-                return []
-
-            # 컬럼명 확인
-            vol_col = "거래량" if "거래량" in df.columns else None
-            close_col = "종가" if "종가" in df.columns else None
-            chg_col = "등락률" if "등락률" in df.columns else None
-
-            if vol_col is None:
-                print(f"[WARN] get_top_stocks: 거래량 컬럼을 찾지 못했습니다. columns={list(df.columns)}")
-                return []
-
-            if close_col is None:
-                print(f"[WARN] get_top_stocks: 종가 컬럼을 찾지 못했습니다. columns={list(df.columns)}")
-                return []
-
-            # 등락률 컬럼이 없는 경우 직접 계산
-            if chg_col is None:
-                prev_df, prev_date = self._get_previous_market_dataframe(target_date)
-
-                if prev_df is None or prev_df.empty:
-                    print("[WARN] get_top_stocks: 등락률 계산용 전일 데이터가 없습니다.")
-                    return []
-
-                prev_close_col = "종가" if "종가" in prev_df.columns else None
-                if prev_close_col is None:
-                    print("[WARN] get_top_stocks: 전일 종가 컬럼이 없습니다.")
-                    return []
-
-                merged = df[[close_col, vol_col]].join(
-                    prev_df[[prev_close_col]].rename(columns={prev_close_col: "_전일종가"}),
-                    how="inner"
-                )
-
-                merged = merged[merged["_전일종가"] > 0]
-                merged["_등락률계산값"] = (
-                    (merged[close_col] - merged["_전일종가"]) / merged["_전일종가"]
-                ) * 100
-
-                df = merged
-                chg_col = "_등락률계산값"
-
-            # 거래량 0 제거
-            df = df[df[vol_col] > 0]
+            df = pd.concat(frames)
 
             if df.empty:
-                print("[WARN] get_top_stocks: 거래량 0 제거 후 데이터가 없습니다.")
-                return []
+                continue
 
-            # 카테고리 분기
-            if category == "volume":
-                sort_col = vol_col
-
-            elif category == "return":
-                sort_col = chg_col
-                df = df[df[chg_col] > 0]  # 상승률 TOP5는 양수만
-
-            else:
-                print(f"[WARN] get_top_stocks: 잘못된 category={category}")
-                return []
-
-            if df.empty:
-                print(f"[WARN] get_top_stocks: category={category} 조건에 맞는 데이터가 없습니다.")
-                return []
-
-            top_df = df.nlargest(5, sort_col)
-
-            result = []
-            for ticker, row in top_df.iterrows():
-                try:
-                    name = pystock.get_ticker_name(ticker)
-                except Exception:
-                    name = ticker
-
-                change_rate = float(row[chg_col]) if pd.notna(row[chg_col]) else 0.0
-                current_price = int(row[close_col]) if pd.notna(row[close_col]) else 0
-
-                result.append({
-                    "symbol": ticker,
-                    "company_name": name,
-                    "current_price": current_price,
-                    "change_rate": round(change_rate, 2),
-                })
-
-            return result
+            return df, target_date
 
         except Exception as e:
-            print(f"[WARN] get_top_stocks 실패: {e}")
+            print(f"[WARN] 최근 시장 데이터 조회 실패 ({target_date}): {e}")
+            continue
+
+    return None, None
+
+
+def _get_previous_market_dataframe(self, base_date: str):
+    """
+    base_date 이전 최근 영업일 데이터 조회
+    """
+    from datetime import datetime, timedelta
+
+    try:
+        from pykrx import stock as pystock
+        import pandas as pd
+    except Exception as e:
+        print(f"[WARN] pykrx import 실패: {e}")
+        return None, None
+
+    base_dt = datetime.strptime(base_date, "%Y%m%d")
+
+    for i in range(1, 8):
+        target_date = (base_dt - timedelta(days=i)).strftime("%Y%m%d")
+
+        try:
+            df_kospi = pystock.get_market_ohlcv_by_ticker(target_date, market="KOSPI")
+            df_kosdaq = pystock.get_market_ohlcv_by_ticker(target_date, market="KOSDAQ")
+
+            if (df_kospi is None or df_kospi.empty) and (df_kosdaq is None or df_kosdaq.empty):
+                print(f"[INFO] 이전 시장 데이터 없음: {target_date}")
+                continue
+
+            frames = []
+            if df_kospi is not None and not df_kospi.empty:
+                frames.append(df_kospi)
+            if df_kosdaq is not None and not df_kosdaq.empty:
+                frames.append(df_kosdaq)
+
+            if not frames:
+                continue
+
+            df = pd.concat(frames)
+
+            if df.empty:
+                continue
+
+            return df, target_date
+
+        except Exception as e:
+            print(f"[WARN] 이전 시장 데이터 조회 실패 ({target_date}): {e}")
+            continue
+
+    return None, None
+
+def get_top_stocks(self, category: str = "volume") -> List[Dict]:
+    """
+    추천 종목 조회
+
+    Args:
+        category:
+            - "volume": 거래량 TOP5
+            - "return": 상승률 TOP5
+    """
+    try:
+        from pykrx import stock as pystock
+        import pandas as pd
+
+        df, target_date = self._get_recent_market_dataframe()
+
+        if df is None or df.empty:
+            print("[WARN] get_top_stocks: 최근 영업일 데이터를 찾지 못했습니다.")
             return []
+
+        # 컬럼명 체크
+        vol_col = "거래량" if "거래량" in df.columns else None
+        close_col = "종가" if "종가" in df.columns else None
+        chg_col = "등락률" if "등락률" in df.columns else None
+
+        if vol_col is None:
+            print(f"[WARN] get_top_stocks: 거래량 컬럼 없음. columns={list(df.columns)}")
+            return []
+
+        if close_col is None:
+            print(f"[WARN] get_top_stocks: 종가 컬럼 없음. columns={list(df.columns)}")
+            return []
+
+        # 등락률 없으면 직접 계산
+        if chg_col is None:
+            prev_df, prev_date = self._get_previous_market_dataframe(target_date)
+
+            if prev_df is None or prev_df.empty:
+                print("[WARN] get_top_stocks: 등락률 계산용 전일 데이터가 없습니다.")
+                return []
+
+            prev_close_col = "종가" if "종가" in prev_df.columns else None
+            if prev_close_col is None:
+                print(f"[WARN] get_top_stocks: 전일 종가 컬럼 없음. columns={list(prev_df.columns)}")
+                return []
+
+            merged = df[[close_col, vol_col]].join(
+                prev_df[[prev_close_col]].rename(columns={prev_close_col: "_전일종가"}),
+                how="inner"
+            )
+
+            merged = merged[merged["_전일종가"] > 0]
+
+            if merged.empty:
+                print("[WARN] get_top_stocks: 전일 데이터 조인 후 결과가 비었습니다.")
+                return []
+
+            merged["_등락률계산값"] = (
+                (merged[close_col] - merged["_전일종가"]) / merged["_전일종가"]
+            ) * 100
+
+            df = merged
+            chg_col = "_등락률계산값"
+
+        # 거래량 0 제거
+        df = df[df[vol_col] > 0]
+
+        if df.empty:
+            print("[WARN] get_top_stocks: 거래량 0 제거 후 데이터 없음")
+            return []
+
+        # 카테고리 분기
+        if category == "volume":
+            sort_col = vol_col
+
+        elif category == "return":
+            sort_col = chg_col
+            df = df[df[chg_col] > 0]   # 상승 종목만
+
+        else:
+            print(f"[WARN] get_top_stocks: 잘못된 category={category}")
+            return []
+
+        if df.empty:
+            print(f"[WARN] get_top_stocks: category={category} 조건에 맞는 데이터 없음")
+            return []
+
+        top_df = df.nlargest(5, sort_col)
+
+        result = []
+        for ticker, row in top_df.iterrows():
+            try:
+                name = pystock.get_ticker_name(ticker)
+            except Exception:
+                name = ticker
+
+            change_rate = float(row[chg_col]) if pd.notna(row[chg_col]) else 0.0
+            current_price = int(row[close_col]) if pd.notna(row[close_col]) else 0
+
+            result.append({
+                "symbol": ticker,
+                "company_name": name,
+                "current_price": current_price,
+                "change_rate": round(change_rate, 2),
+            })
+
+        return result
+
+    except Exception as e:
+        print(f"[WARN] get_top_stocks 실패: {e}")
+        return []
 
     # ========================================
     # 현재가 조회 및 표시 형식
