@@ -1,8 +1,19 @@
+"""
+Chatbot_06 관심 종목 API
+챗봇 기획에 맞춘 관심 종목 관리 및 카카오톡 응답 포맷
+
+기획:
+- 최대 10개 등록, 등록 순서 유지
+- 관심 종목 저장소: ./favorites/{user_id}.json (Web_05와 공유)
+- 탐색 허브: 추천(거래량/상승률) → 정보 확인 → 저장
+- 요약 정보: 종목 리포트 + 뉴스/커뮤니티 + 거래내역 (캐로셀 2장)
+- 보유 종목 불러오기: 계좌 연동 기반 일괄 등록
+"""
+
 import os
 import json
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
-
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -11,31 +22,26 @@ load_dotenv()
 NUM_EMOJIS = ["➊", "➋", "➌", "➍", "➎", "➏", "➐", "➑", "➒", "➓"]
 
 # FDR 종목 목록 캐시 (프로세스 내 1회만 로드)
-_stock_list_cache: Optional[Dict[str, str]] = None  # name -> symbol
+_stock_list_cache: Optional[Dict[str, str]] = None  # name → symbol
 
 
 def _load_stock_list() -> Dict[str, str]:
-    """FDR 종목 목록 로드 (KOSPI + KOSDAQ, 이름 -> 티커 매핑)"""
+    """FDR 종목 목록 로드 (KOSPI + KOSDAQ, 이름 → 티커 매핑)"""
     global _stock_list_cache
-
     if _stock_list_cache is not None:
         return _stock_list_cache
 
     try:
         import FinanceDataReader as fdr
-        import pandas as pd
-
         kospi = fdr.StockListing("KOSPI")[["Symbol", "Name"]]
         kosdaq = fdr.StockListing("KOSDAQ")[["Symbol", "Name"]]
-
+        import pandas as pd
         all_stocks = pd.concat([kospi, kosdaq], ignore_index=True)
-
         _stock_list_cache = {
             row["Name"]: row["Symbol"]
             for _, row in all_stocks.iterrows()
             if row["Name"] and row["Symbol"]
         }
-
     except Exception as e:
         print(f"[WARN] 종목 목록 로드 실패: {e}")
         _stock_list_cache = {}
@@ -50,7 +56,7 @@ class ChatbotFavorites:
     기능:
     - get_favorites() / add_favorite() / remove_favorite_by_name(): 관심 종목 CRUD
     - search_stock(): 종목명 검색 (FDR 기반)
-    - get_top_stocks(): 추천 종목 (거래량/상승률 TOP5, pykrx get_market_price_change 기반)
+    - get_top_stocks(): 추천 종목 (거래량/상승률 TOP5, pykrx 기반)
     - load_holdings_to_favorites(): 보유 종목 일괄 불러오기
     - get_summary_card_data(): 요약 정보 (리포트 + 뉴스 + 거래내역)
     - format_*_for_kakao(): 카카오톡 API 2.0 형식 변환
@@ -62,35 +68,27 @@ class ChatbotFavorites:
     def __init__(self):
         os.makedirs(self.FAVORITES_DIR, exist_ok=True)
 
-        # --------------------------------------------------
-        # HantuStock / StockChartDataProvider 초기화
-        # --------------------------------------------------
+        # HantuStock (싱글톤 재사용 — 토큰 재발급 방지)
         try:
-            from app.services.chatbot_report.stock_chart_data import StockChartDataProvider
-
+            from stock_chart_data import _hantu_shared, StockChartDataProvider
             self._provider = StockChartDataProvider()
-            self._hantu = getattr(self._provider, "_hantu", None)
-
+            self._hantu = self._provider._hantu
         except Exception as e:
             print(f"[WARN] StockChartDataProvider 초기화 실패: {e}")
-            self._provider = None
             self._hantu = None
+            self._provider = None
 
-        # --------------------------------------------------
-        # Chatbot_02 종목 리포트
-        # --------------------------------------------------
+        # Chatbot_02 (종목 리포트)
         try:
-            from app.services.chatbot_report.chatbot_stock_report import ChatbotStockReport
+            from chatbot_stock_report import ChatbotStockReport
             self._report = ChatbotStockReport()
         except Exception as e:
             print(f"[WARN] ChatbotStockReport 초기화 실패: {e}")
             self._report = None
 
-        # --------------------------------------------------
-        # Chatbot_05 뉴스/커뮤니티
-        # --------------------------------------------------
+        # Chatbot_05 (뉴스/커뮤니티)
         try:
-            from app.services.chatbot_community.chatbot_news_community import ChatbotNewsCommunity
+            from chatbot_news_community import ChatbotNewsCommunity
             self._news = ChatbotNewsCommunity()
         except Exception as e:
             print(f"[WARN] ChatbotNewsCommunity 초기화 실패: {e}")
@@ -106,27 +104,15 @@ class ChatbotFavorites:
     def _load(self, user_id: str) -> List[Dict]:
         """저장된 관심 종목 로드"""
         path = self._get_path(user_id)
-
         if os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-
-                if isinstance(data, list):
-                    return data
-
-            except Exception as e:
-                print(f"[WARN] 관심 종목 로드 실패 ({user_id}): {e}")
-
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
         return []
 
     def _save(self, user_id: str, favorites: List[Dict]) -> None:
         """관심 종목 저장"""
-        try:
-            with open(self._get_path(user_id), "w", encoding="utf-8") as f:
-                json.dump(favorites, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"[WARN] 관심 종목 저장 실패 ({user_id}): {e}")
+        with open(self._get_path(user_id), "w", encoding="utf-8") as f:
+            json.dump(favorites, f, ensure_ascii=False, indent=2)
 
     def get_favorites(self, user_id: str) -> List[Dict]:
         """
@@ -168,18 +154,14 @@ class ChatbotFavorites:
             {"success": True/False, "symbol": "...", "company_name": "...", "count": N}
         """
         favorites = self._load(user_id)
-        target = next((f for f in favorites if f["company_name"] == company_name), None)
-
+        target = next(
+            (f for f in favorites if f["company_name"] == company_name), None
+        )
         if not target:
-            return {
-                "success": False,
-                "company_name": company_name,
-                "count": len(favorites),
-            }
+            return {"success": False, "company_name": company_name, "count": len(favorites)}
 
         favorites = [f for f in favorites if f["symbol"] != target["symbol"]]
         self._save(user_id, favorites)
-
         return {
             "success": True,
             "symbol": target["symbol"],
@@ -218,7 +200,7 @@ class ChatbotFavorites:
                 "candidates": [],
             }
 
-        # 2단계: 부분 일치
+        # 2단계: 부분 일치 (query가 이름에 포함)
         candidates = [
             {"company_name": name, "symbol": sym}
             for name, sym in stock_list.items()
@@ -232,8 +214,8 @@ class ChatbotFavorites:
                 "company_name": candidates[0]["company_name"],
                 "candidates": [],
             }
-
-        if len(candidates) > 1:
+        elif len(candidates) > 1:
+            # 짧은 이름 우선 정렬 (더 정확한 매칭 가능성)
             candidates.sort(key=lambda x: len(x["company_name"]))
             return {
                 "matched": True,
@@ -242,205 +224,27 @@ class ChatbotFavorites:
                 "candidates": candidates[:5],
             }
 
-        return {
-            "matched": False,
-            "symbol": "",
-            "company_name": query,
-            "candidates": [],
-        }
+        return {"matched": False, "symbol": "", "company_name": query, "candidates": []}
 
     # ========================================
-    # 추천 종목 (pykrx get_market_price_change 기반)
+    # 추천 종목 (pykrx 기반 거래량/상승률 TOP5)
     # ========================================
-
-    def _find_recent_date_pairs(self, lookback_days: int = 14) -> List[Tuple[str, str]]:
-        """
-        최근 날짜들 중 (이전 날짜, 기준 날짜) 쌍을 생성
-
-        pykrx get_market_price_change()는
-        같은 날짜(start == end)로 호출 시 내부에서 실패할 수 있어
-        최소 2개 날짜 구간으로 조회합니다.
-        """
-        today = datetime.now()
-        dates = [
-            (today - timedelta(days=i)).strftime("%Y%m%d")
-            for i in range(lookback_days)
-        ]
-
-        # 오래된 날짜 -> 최신 날짜 순으로 정렬 후 인접 쌍 생성
-        dates = sorted(dates)
-        pairs = [(dates[i - 1], dates[i]) for i in range(1, len(dates))]
-
-        # 최신 구간부터 먼저 시도
-        pairs.reverse()
-        return pairs
-
-    def _normalize_price_change_df(self, df):
-        """
-        pykrx get_market_price_change() 결과 컬럼을 표준화
-
-        기대 표준 컬럼:
-        - 현재가
-        - 거래량
-        - 등락률
-        """
-        import pandas as pd
-
-        if df is None or df.empty:
-            return None
-
-        df = df.copy()
-
-        # pykrx 버전/시장에 따라 컬럼명이 다를 수 있어 방어적으로 처리
-        rename_map = {}
-
-        # 현재가 계열
-        if "종가" in df.columns:
-            rename_map["종가"] = "현재가"
-        elif "현재가" in df.columns:
-            rename_map["현재가"] = "현재가"
-
-        # 거래량 계열
-        if "거래량" in df.columns:
-            rename_map["거래량"] = "거래량"
-
-        # 등락률 계열
-        if "등락률" in df.columns:
-            rename_map["등락률"] = "등락률"
-
-        df = df.rename(columns=rename_map)
-
-        required_cols = ["현재가", "거래량", "등락률"]
-        missing_cols = [col for col in required_cols if col not in df.columns]
-        if missing_cols:
-            print(f"[WARN] price_change 결과 필수 컬럼 누락: {missing_cols}, columns={list(df.columns)}")
-            return None
-
-        # 숫자형 강제 변환
-        for col in required_cols:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-        # NaN 제거
-        df = df.dropna(subset=required_cols)
-
-        # 거래정지/이상 데이터 방지
-        df = df[df["현재가"] > 0]
-        df = df[df["거래량"] > 0]
-
-        if df.empty:
-            return None
-
-        return df
-
-    def _get_recent_market_price_change_dataframe(self):
-        """
-        최근 유효한 (이전 날짜 ~ 기준 날짜) 구간의
-        KOSPI + KOSDAQ 가격변동 데이터를 반환
-
-        핵심:
-        - get_market_ohlcv_by_ticker() 사용 안 함
-        - get_market_price_change(prev_date, target_date, market) 사용
-        - 같은 날짜 조회로 인한 pykrx 내부 오류 회피
-        """
-        try:
-            from pykrx import stock as pystock
-            import pandas as pd
-        except Exception as e:
-            print(f"[WARN] pykrx import 실패: {e}")
-            return None, None
-
-        date_pairs = self._find_recent_date_pairs(lookback_days=14)
-
-        for prev_date, target_date in date_pairs:
-            try:
-                frames = []
-
-                for market in ["KOSPI", "KOSDAQ"]:
-                    try:
-                        raw_df = pystock.get_market_price_change(prev_date, target_date, market=market)
-                    except Exception as e:
-                        print(f"[WARN] 가격변동 조회 실패 ({market}, {prev_date}~{target_date}): {e}")
-                        continue
-
-                    if raw_df is None or raw_df.empty:
-                        continue
-
-                    normalized_df = self._normalize_price_change_df(raw_df)
-                    if normalized_df is not None and not normalized_df.empty:
-                        frames.append(normalized_df)
-
-                if not frames:
-                    print(f"[INFO] 유효한 가격변동 데이터 없음: {prev_date} ~ {target_date}")
-                    continue
-
-                df = pd.concat(frames)
-                if df.empty:
-                    continue
-
-                return df, target_date
-
-            except Exception as e:
-                print(f"[WARN] 최근 가격변동 데이터 통합 실패 ({prev_date}~{target_date}): {e}")
-                continue
-
-        return None, None
 
     def get_top_stocks(self, category: str = "volume") -> List[Dict]:
         """
-        추천 종목 조회
+        추천 종목 조회 (KIS API 거래량/등락률 순위)
 
         Args:
-            category:
-                - "volume": 거래량 TOP5
-                - "return": 상승률 TOP5
+            category: "volume" (거래량 TOP5) | "return" (등락률 TOP5)
+
+        Returns:
+            [{"symbol": "...", "company_name": "...", "current_price": ..., "change_rate": ...}, ...]
         """
+        if not self._hantu:
+            return []
+
         try:
-            from pykrx import stock as pystock
-
-            # NOTE:
-            # 기존 구현은 get_market_ohlcv_by_ticker() 기반이었는데
-            # 현재는 해당 경로가 깨진 상태로 보고 우회합니다.
-            # 또한 get_market_price_change()도 같은 날짜 조회는 불안정하여
-            # 이전 날짜 ~ 기준 날짜 구간 조회만 사용합니다.
-            df, target_date = self._get_recent_market_price_change_dataframe()
-
-            if df is None or df.empty:
-                print("[WARN] get_top_stocks: 최근 영업일 가격변동 데이터를 찾지 못했습니다.")
-                return []
-
-            if category == "volume":
-                # 거래량 기준 상위 5개
-                top_df = df.nlargest(5, "거래량")
-
-            elif category == "return":
-                # 상승 종목만 남기고 등락률 기준 상위 5개
-                df = df[df["등락률"] > 0]
-                if df.empty:
-                    print(f"[WARN] get_top_stocks: 상승률 기준 데이터 없음 ({target_date})")
-                    return []
-
-                top_df = df.nlargest(5, "등락률")
-
-            else:
-                print(f"[WARN] get_top_stocks: 잘못된 category={category}")
-                return []
-
-            result = []
-            for ticker, row in top_df.iterrows():
-                try:
-                    name = pystock.get_ticker_name(ticker)
-                except Exception:
-                    name = ticker
-
-                result.append({
-                    "symbol": ticker,
-                    "company_name": name,
-                    "current_price": int(row["현재가"]),
-                    "change_rate": round(float(row["등락률"]), 2),
-                })
-
-            return result
-
+            return self._hantu.get_market_ranking(category=category, limit=5)
         except Exception as e:
             print(f"[WARN] get_top_stocks 실패: {e}")
             return []
@@ -462,15 +266,13 @@ class ChatbotFavorites:
 
         try:
             data = self._hantu.get_stock_price(symbol)
-
-            if not isinstance(data, dict) or "error" in data:
+            if "error" in data:
                 return ("N/A", "➖", "0.0%")
 
             price = data.get("current_price", 0)
             rate = data.get("change_rate", 0.0)
 
             price_str = f"{price:,}원"
-
             if rate > 0:
                 emoji = "🔺"
                 change_str = f"{rate:.1f}%"
@@ -482,16 +284,13 @@ class ChatbotFavorites:
                 change_str = "0.0%"
 
             return (price_str, emoji, change_str)
-
-        except Exception as e:
-            print(f"[WARN] 현재가 조회 실패 ({symbol}): {e}")
+        except Exception:
             return ("N/A", "➖", "0.0%")
 
     def _get_favorites_with_price(self, user_id: str) -> List[Dict]:
         """현재가 포함 관심 종목 목록"""
         favorites = self._load(user_id)
         result = []
-
         for f in favorites:
             price_str, emoji, change_str = self._get_price_display(f["symbol"])
             result.append({
@@ -500,26 +299,22 @@ class ChatbotFavorites:
                 "emoji": emoji,
                 "change_str": change_str,
             })
-
         return result
 
     def _format_favorites_list(self, favorites_with_price: List[Dict]) -> str:
-        """관심 종목 리스트 텍스트 생성"""
+        """관심 종목 리스트 텍스트 생성 (➊ 삼성전자 72,500원 (🔺 1.2%))"""
         lines = []
-
         for i, f in enumerate(favorites_with_price[:10]):
             emoji = NUM_EMOJIS[i]
             price_str = f.get("price_str", "")
             chg_emoji = f.get("emoji", "")
             change_str = f.get("change_str", "")
-
             if price_str and price_str != "N/A":
                 lines.append(
                     f"{emoji} {f['company_name']} {price_str} ({chg_emoji} {change_str})"
                 )
             else:
                 lines.append(f"{emoji} {f['company_name']}")
-
         return "\n".join(lines)
 
     # ========================================
@@ -529,16 +324,20 @@ class ChatbotFavorites:
     def load_holdings_to_favorites(self, user_id: str) -> Dict:
         """
         보유 종목을 관심 종목에 일괄 등록 (빈 공간만큼)
+
+        Returns:
+            {
+                "success": True,
+                "added": [{"symbol": "...", "company_name": "..."}],
+                "skipped": [...],   # 이미 등록된 종목
+                "not_added": [...], # 공간 부족으로 못 넣은 종목
+                "total_count": N
+            }
         """
         if not self._hantu:
             return {"success": False, "reason": "no_account"}
 
-        try:
-            holdings = self._hantu.get_holding_stock_detail()
-        except Exception as e:
-            print(f"[WARN] 보유 종목 조회 실패: {e}")
-            return {"success": False, "reason": "no_account"}
-
+        holdings = self._hantu.get_holding_stock_detail()
         if not holdings:
             return {"success": False, "reason": "no_holdings"}
 
@@ -553,15 +352,12 @@ class ChatbotFavorites:
         for h in holdings:
             symbol = h["pdno"]
             name = h["prdt_name"]
-
             if symbol in existing_symbols:
                 skipped.append({"symbol": symbol, "company_name": name})
                 continue
-
             if available_slots <= 0:
                 not_added.append({"symbol": symbol, "company_name": name})
                 continue
-
             favorites.append({
                 "symbol": symbol,
                 "company_name": name,
@@ -589,6 +385,12 @@ class ChatbotFavorites:
     def get_summary_card_data(self, symbol: str, company_name: str) -> Dict:
         """
         관심 종목 요약 정보 수집 (캐로셀 2장 데이터)
+
+        Returns:
+            {
+                "card1": {종목 리포트 요약 + 커뮤니티/뉴스 헤드라인},
+                "card2": {최근 일주일 거래내역 요약}
+            }
         """
         card1 = self._collect_report_news_card(symbol, company_name)
         card2 = self._collect_transaction_card(symbol)
@@ -633,15 +435,16 @@ class ChatbotFavorites:
                 )
 
                 # 1년 수익률
+                returns = {}
                 try:
                     df = self._provider.get_historical_data(symbol)
                     if not df.empty and len(df) > 252:
                         current = float(df["close"].iloc[-1])
                         past = float(df["close"].iloc[-252])
-                        result["return_1y"] = round((current - past) / past * 100, 1)
+                        returns["1y"] = round((current - past) / past * 100, 1)
                 except Exception:
                     pass
-
+                result["return_1y"] = returns.get("1y")
         except Exception as e:
             print(f"[WARN] 리포트 데이터 수집 실패 ({symbol}): {e}")
 
@@ -656,7 +459,6 @@ class ChatbotFavorites:
                     issue["title"]
                     for issue in news.get("key_issues", [])[:2]
                 ]
-
         except Exception as e:
             print(f"[WARN] 뉴스/커뮤니티 데이터 수집 실패 ({symbol}): {e}")
 
@@ -687,8 +489,7 @@ class ChatbotFavorites:
             end_date = today.strftime("%Y%m%d")
 
             all_tx = self._hantu.get_transaction_history(
-                start_date=start_date,
-                end_date=end_date
+                start_date=start_date, end_date=end_date
             )
             tx = [t for t in all_tx if t["pdno"] == symbol]
 
@@ -697,6 +498,7 @@ class ChatbotFavorites:
                 result["period_end"] = today.strftime("%Y.%m.%d")
                 return result
 
+            # 실제 거래 기간
             dates = sorted(t["ord_dt"] for t in tx)
             result["period_start"] = f"{dates[0][:4]}.{dates[0][4:6]}.{dates[0][6:]}"
             result["period_end"] = f"{dates[-1][:4]}.{dates[-1][4:6]}.{dates[-1][6:]}"
@@ -704,7 +506,6 @@ class ChatbotFavorites:
 
             for t in tx:
                 amt = t["tot_ccld_amt"]
-
                 if t["sll_buy_dvsn_cd"] == "02":
                     result["buy_trades"] += 1
                     result["buy_amount"] += amt
@@ -714,7 +515,6 @@ class ChatbotFavorites:
 
             result["total_trades"] = len(tx)
             result["realized_profit"] = result["sell_amount"] - result["buy_amount"]
-
         except Exception as e:
             print(f"[WARN] 거래내역 수집 실패 ({symbol}): {e}")
 
@@ -727,6 +527,13 @@ class ChatbotFavorites:
     def format_entry_for_kakao(self, user_id: str, user_name: str) -> Dict:
         """
         기능 진입 화면 (Section 1 — Case 1/2/3 자동 분기)
+
+        Args:
+            user_id: 사용자 ID
+            user_name: 사용자 이름
+
+        Returns:
+            카카오톡 API 2.0 응답 (simpleText + quickReplies)
         """
         favorites = self._get_favorites_with_price(user_id)
         n = len(favorites)
@@ -768,7 +575,7 @@ class ChatbotFavorites:
                 {"action": "block", "label": "메인으로", "messageText": "메인으로", "blockId": "main_block"},
             ]
 
-        else:
+        else:  # n == 10
             list_text = self._format_favorites_list(favorites)
             text = (
                 f"▪️{user_name}님의 관심 종목 리스트예요 !\n\n"
@@ -802,7 +609,10 @@ class ChatbotFavorites:
         card1: Dict,
     ) -> Dict:
         """
-        종목 검색 결과 + 요약 정보
+        종목 검색 결과 + 요약 정보 (Section 2-2 Case A)
+
+        Args:
+            card1: _collect_report_news_card() 결과
         """
         price = card1.get("current_price", 0)
         change = card1.get("price_change", 0)
@@ -814,13 +624,9 @@ class ChatbotFavorites:
         rsi = card1.get("rsi", "N/A")
 
         metrics_parts = []
-        if per is not None:
-            metrics_parts.append(f"PER {per}")
-        if pbr is not None:
-            metrics_parts.append(f"PBR {pbr}")
-        if roe is not None:
-            metrics_parts.append(f"ROE {roe}")
-
+        if per is not None: metrics_parts.append(f"PER {per}")
+        if pbr is not None: metrics_parts.append(f"PBR {pbr}")
+        if roe is not None: metrics_parts.append(f"ROE {roe}")
         metrics_str = " / ".join(metrics_parts) if metrics_parts else "N/A"
 
         text = (
@@ -830,19 +636,19 @@ class ChatbotFavorites:
             f"▪️ {company_name}({symbol}) 종목 리포트 요약이에요!\n\n"
             f"• 현재가 : {price:,}원 ({change_sign}{change:,}원)\n"
         )
-
         if return_1y is not None:
             sign = "+" if return_1y >= 0 else ""
             text += f"• 1년 수익률 : {sign}{return_1y}%\n"
-
         text += f"• 주요 지표 : {metrics_str}\n"
         text += f"• 기술적 지표(RSI) : {rsi}\n"
 
+        # 커뮤니티
         community_text = card1.get("community_text")
         if community_text:
             text += "\n-------------------------------------\n\n"
             text += f"📍 커뮤니티 분위기\n\n{community_text}\n"
 
+        # 뉴스
         news_headlines = card1.get("news_headlines", [])
         if news_headlines:
             text += f"\n📍 {company_name} 관련 주요 뉴스\n\n"
@@ -866,7 +672,8 @@ class ChatbotFavorites:
         self, user_id: str, user_name: str, company_name: str
     ) -> Dict:
         """
-        관심 종목 등록 완료
+        관심 종목 등록 완료 (Section 2-3)
+        현재 총 개수에 따라 10개 도달 / 정상 등록 분기
         """
         favorites = self._get_favorites_with_price(user_id)
         n = len(favorites)
@@ -908,7 +715,10 @@ class ChatbotFavorites:
 
     def format_top_stocks_for_kakao(self, stocks: List[Dict], category: str) -> Dict:
         """
-        추천 종목 리스트 출력
+        추천 종목 리스트 출력 (Section 3-2)
+
+        Args:
+            category: "volume" | "return"
         """
         category_label = "거래량" if category == "volume" else "상승률"
         opposite_label = "상승률 TOP5" if category == "volume" else "거래량 TOP5"
@@ -946,7 +756,7 @@ class ChatbotFavorites:
     def format_delete_complete_for_kakao(
         self, user_id: str, user_name: str, company_name: str
     ) -> Dict:
-        """관심 종목 삭제 완료"""
+        """관심 종목 삭제 완료 (Section 4-3)"""
         favorites = self._get_favorites_with_price(user_id)
         n = len(favorites)
         list_text = self._format_favorites_list(favorites)
@@ -966,12 +776,10 @@ class ChatbotFavorites:
             {"action": "block", "label": "종목 검색 후 추가", "messageText": "종목 검색 추가", "blockId": "favorite_search_block"},
             {"action": "block", "label": "추천 종목 보기", "messageText": "추천 종목", "blockId": "favorite_recommend_block"},
         ]
-
         if n > 0:
             quick_replies.append(
                 {"action": "block", "label": "관심 종목 삭제", "messageText": "관심 종목 삭제", "blockId": "favorite_delete_block"}
             )
-
         quick_replies.append(
             {"action": "block", "label": "메인으로", "messageText": "메인으로", "blockId": "main_block"}
         )
@@ -992,8 +800,12 @@ class ChatbotFavorites:
         card2: Dict,
     ) -> Dict:
         """
-        관심 종목 요약 정보 캐로셀
+        관심 종목 요약 정보 캐로셀 (Section 5-2 Case B)
+
+        카드 1: 종목 리포트 & 뉴스/커뮤니티
+        카드 2: 최근 일주일 거래내역 요약
         """
+        # ── 카드 1 내용 ──────────────────────────────
         price = card1.get("current_price", 0)
         change = card1.get("price_change", 0)
         change_sign = "+" if change >= 0 else ""
@@ -1004,24 +816,18 @@ class ChatbotFavorites:
         rsi = card1.get("rsi", "N/A")
 
         metrics_parts = []
-        if per is not None:
-            metrics_parts.append(f"PER {per}")
-        if pbr is not None:
-            metrics_parts.append(f"PBR {pbr}")
-        if roe is not None:
-            metrics_parts.append(f"ROE {roe}")
-
+        if per is not None: metrics_parts.append(f"PER {per}")
+        if pbr is not None: metrics_parts.append(f"PBR {pbr}")
+        if roe is not None: metrics_parts.append(f"ROE {roe}")
         metrics_str = " / ".join(metrics_parts) if metrics_parts else "N/A"
 
         card1_desc = (
             f"▪️ {company_name}({symbol}) 종목 리포트 요약이에요!\n\n"
             f"• 현재가 : {price:,}원 ({change_sign}{change:,}원)\n"
         )
-
         if return_1y is not None:
             sign = "+" if return_1y >= 0 else ""
             card1_desc += f"• 1년 수익률 : {sign}{return_1y}%\n"
-
         card1_desc += f"• 주요 지표 : {metrics_str}\n"
         card1_desc += f"• 기술적 지표(RSI) : {rsi}"
 
@@ -1036,6 +842,7 @@ class ChatbotFavorites:
 
         web_url = card1.get("web_url", f"https://jutopia.com/stock/{symbol}")
 
+        # ── 카드 2 내용 ──────────────────────────────
         if card2.get("no_transaction"):
             card2_desc = (
                 f"📑 {company_name} 거래내역 요약이에요!\n\n"
@@ -1101,13 +908,14 @@ class ChatbotFavorites:
     def format_holdings_loaded_for_kakao(
         self, user_id: str, user_name: str, result: Dict
     ) -> Dict:
-        """보유 종목 불러오기 결과"""
+        """보유 종목 불러오기 결과 (Section 6-2)"""
         favorites = self._get_favorites_with_price(user_id)
         n = len(favorites)
         list_text = self._format_favorites_list(favorites)
         not_added = result.get("not_added", [])
 
         if not not_added:
+            # Case A: 전체 등록 성공
             text = (
                 f"▪️{user_name}님의 보유 종목을 관심 종목 리스트로 모두 불러왔어요!\n\n"
                 f"📁 내 관심 종목\n{list_text}\n\n"
@@ -1119,6 +927,7 @@ class ChatbotFavorites:
                 {"action": "block", "label": "메인으로", "messageText": "메인으로", "blockId": "main_block"},
             ]
         else:
+            # Case B: 일부만 등록 (공간 부족)
             text = (
                 f"▪️{user_name}님의 보유 종목과 관심 종목은 총 {n}개에요.\n\n"
                 f"📁 내 관심 종목 & 보유 종목\n\n{list_text}\n\n"
@@ -1146,12 +955,89 @@ class ChatbotFavorites:
         return {
             "version": "2.0",
             "template": {
-                "outputs": [
-                    {
-                        "simpleText": {
-                            "text": f"❌ {message}\n잠시 후 다시 시도해주세요."
-                        }
-                    }
-                ]
+                "outputs": [{"simpleText": {"text": f"❌ {message}\n잠시 후 다시 시도해주세요."}}]
             },
         }
+
+
+# ========================================
+# 테스트
+# ========================================
+
+if __name__ == "__main__":
+    import json
+
+    print("=" * 60)
+    print("Chatbot_06 관심 종목 테스트")
+    print("=" * 60)
+
+    chatbot = ChatbotFavorites()
+    user_id = "test_user"
+    user_name = "홍길동"
+
+    # 1. 진입 화면 (N=0)
+    print("\n[1] 진입 화면 (관심 종목 0개)")
+    print("-" * 40)
+    result = chatbot.format_entry_for_kakao(user_id, user_name)
+    text = result["template"]["outputs"][0]["simpleText"]["text"]
+    print(text[:200])
+
+    # 2. 종목 검색
+    print("\n[2] 종목 검색: 삼성전자")
+    print("-" * 40)
+    search = chatbot.search_stock("삼성전자")
+    print(f"  매칭: {search['matched']} | {search['company_name']} ({search['symbol']})")
+
+    search2 = chatbot.search_stock("없는종목XYZ")
+    print(f"  매칭 실패: {search2['matched']}")
+
+    # 3. 관심 종목 추가
+    print("\n[3] 관심 종목 추가")
+    print("-" * 40)
+    for sym, name in [("005930", "삼성전자"), ("000660", "SK하이닉스"), ("035420", "NAVER")]:
+        r = chatbot.add_favorite(user_id, sym, name)
+        print(f"  {name}: {r['reason']} (총 {r['count']}개)")
+
+    # 4. 진입 화면 (N>0)
+    print("\n[4] 진입 화면 (관심 종목 3개)")
+    print("-" * 40)
+    result = chatbot.format_entry_for_kakao(user_id, user_name)
+    text = result["template"]["outputs"][0]["simpleText"]["text"]
+    print(text[:300])
+
+    # 5. 추천 종목
+    print("\n[5] 추천 종목 (거래량 TOP5)")
+    print("-" * 40)
+    try:
+        tops = chatbot.get_top_stocks("volume")
+        if tops:
+            for i, s in enumerate(tops):
+                print(f"  {NUM_EMOJIS[i]} {s['company_name']} {s['current_price']:,}원 ({s['change_rate']:+.1f}%)")
+        else:
+            print("  [장외] 데이터 없음")
+    except Exception as e:
+        print(f"  [ERROR] {e}")
+
+    # 6. 관심 종목 삭제
+    print("\n[6] 관심 종목 삭제: 삼성전자")
+    print("-" * 40)
+    del_result = chatbot.remove_favorite_by_name(user_id, "삼성전자")
+    print(f"  삭제: {del_result['success']} (남은 {del_result['count']}개)")
+    kakao = chatbot.format_delete_complete_for_kakao(user_id, user_name, "삼성전자")
+    print(kakao["template"]["outputs"][0]["simpleText"]["text"][:200])
+
+    # 7. 요약 정보 카드 데이터
+    print("\n[7] 요약 정보 카드 데이터: SK하이닉스")
+    print("-" * 40)
+    card_data = chatbot.get_summary_card_data("000660", "SK하이닉스")
+    c1 = card_data["card1"]
+    c2 = card_data["card2"]
+    print(f"  현재가: {c1.get('current_price', 0):,}원")
+    print(f"  RSI: {c1.get('rsi', 'N/A')}")
+    print(f"  거래내역: {c2.get('total_trades', 0)}건 (있음: {not c2.get('no_transaction', True)})")
+
+    # 8. 정리
+    chatbot.remove_favorite_by_name(user_id, "SK하이닉스")
+    chatbot.remove_favorite_by_name(user_id, "NAVER")
+    print("\n[완료] 테스트 종료")
+    print("=" * 60)
