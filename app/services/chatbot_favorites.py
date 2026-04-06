@@ -70,7 +70,7 @@ class ChatbotFavorites:
 
         # HantuStock (싱글톤 재사용 — 토큰 재발급 방지)
         try:
-            from stock_chart_data import _hantu_shared, StockChartDataProvider
+            from app.services.chatbot_report.stock_chart_data import _hantu_shared, StockChartDataProvider
             self._provider = StockChartDataProvider()
             self._hantu = self._provider._hantu
         except Exception as e:
@@ -80,7 +80,7 @@ class ChatbotFavorites:
 
         # Chatbot_02 (종목 리포트)
         try:
-            from chatbot_stock_report import ChatbotStockReport
+            from app.services.chatbot_report.chatbot_stock_report import ChatbotStockReport
             self._report = ChatbotStockReport()
         except Exception as e:
             print(f"[WARN] ChatbotStockReport 초기화 실패: {e}")
@@ -88,7 +88,7 @@ class ChatbotFavorites:
 
         # Chatbot_05 (뉴스/커뮤니티)
         try:
-            from chatbot_news_community import ChatbotNewsCommunity
+            from app.services.chatbot_community.chatbot_news_community import ChatbotNewsCommunity
             self._news = ChatbotNewsCommunity()
         except Exception as e:
             print(f"[WARN] ChatbotNewsCommunity 초기화 실패: {e}")
