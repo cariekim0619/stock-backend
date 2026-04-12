@@ -5,10 +5,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers import report_router
-from app.routers import chatbot_news_community_router  # ✅ 기존 Chatbot_05
-from app.routers import glossary_router  # ✅ Chatbot_03 주식 용어 사전
-from app.routers import chatbot_transaction_router  # ✅ Chatbot_04 거래내역/요약 리포트
-from app.routers import chatbot_favorites_router  # ✅ Chatbot_06 관심 종목 추가
+from app.routers import chatbot_news_community_router
+from app.routers import glossary_router
+from app.routers import chatbot_transaction_router
+from app.routers import chatbot_favorites_router
 from app.utils.ticker_normalizer import warm_stock_universe_cache
 
 # ✅ 앱 시작 시 .env를 한 번만 로드
@@ -18,8 +18,7 @@ app = FastAPI()
 
 # NOTE:
 # allow_credentials=True 와 allow_origins=["*"] 조합은
-# 브라우저 CORS 환경에서 문제가 될 수 있음.
-# 운영에서는 실제 도메인만 허용하는 방식이 더 안전함.
+# 브라우저 CORS 환경에서 문제가 될 수 있음. 조심할 것.
 origins = ["*"]
 
 app.add_middleware(
@@ -30,7 +29,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ✅ 기존 라우터
+# ✅ Chatbot_02 라우터
 app.include_router(report_router.router)
 
 # ✅ Chatbot_05 라우터
