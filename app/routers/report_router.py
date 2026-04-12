@@ -53,9 +53,9 @@ def get_report(request: ReportRequest):
 class ChatbotReportRequest(BaseModel):
     mode: str
     ticker: Optional[str] = ""
-    uuid: Optional[str] = ""          # 현재 미사용
+    uuid: Optional[str] = ""        
     section: Optional[str] = ""
-    user_name: Optional[str] = "사용자"   # 현재 chatbot_stock_report.py에서는 실제 사용 안 함
+    user_name: Optional[str] = "사용자" 
     list_type: Optional[str] = ""
     stocks: Optional[List[str]] = None
 
