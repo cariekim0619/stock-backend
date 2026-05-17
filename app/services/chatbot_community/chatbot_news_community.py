@@ -18,6 +18,8 @@ from app.utils.ticker_normalizer import resolve_symbol_and_name
 
 load_dotenv()
 
+from app.services.segment_personalization import build_system_instruction  # ★ Stage 4
+
 
 class ChatbotNewsCommunity:
     """
@@ -53,14 +55,16 @@ class ChatbotNewsCommunity:
     def get_community_summary(
         self,
         symbol: str,
-        company_name: str
+        company_name: str,
+        segment: str = "default"  # ★ Stage 4
     ) -> Dict:
         """
-        커뮤니티 요약 (챗봇용)
+        커뮤니티 요약 (챗봇용) ★ Stage 4: segment 인자 추가
 
         Args:
             symbol: 종목코드 (예: "005930")
             company_name: 회사명 (예: "삼성전자")
+            segment: 사용자 세그먼트 라벨 (기본값 "default" → 기존 동작 유지)
 
         Returns:
             {
@@ -95,8 +99,8 @@ class ChatbotNewsCommunity:
         sentiment_tone = self._calculate_overall_sentiment(items)
         sentiment_emoji = self._get_sentiment_emoji(sentiment_tone)
 
-        # 대표 의견 추출 (2-3개)
-        key_opinions = self._extract_key_opinions(items, company_name)
+        # 대표 의견 추출 (2-3개) ★ Stage 4: segment 전달
+        key_opinions = self._extract_key_opinions(items, company_name, segment=segment)
 
         # 요약 텍스트 생성
         summary_text = self._generate_sentiment_summary(sentiment_tone, items)
@@ -113,7 +117,8 @@ class ChatbotNewsCommunity:
             "key_opinions": key_opinions[:3],  # 최대 3개
             "timestamp": timestamp,
             "web_url": f"https://jutopia.com/stock/{symbol}/community",
-            "fetched_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            "fetched_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "segment": segment,  # ★ Stage 4: 디버깅/캐싱용
         }
 
     def _calculate_overall_sentiment(self, items: List[Dict]) -> str:
@@ -193,8 +198,10 @@ class ChatbotNewsCommunity:
 
         return ""
 
-    def _extract_key_opinions(self, items: List[Dict], company_name: str) -> List[str]:
-        """대표 의견 추출 (LLM 활용)"""
+    def _extract_key_opinions(
+        self, items: List[Dict], company_name: str, segment: str = "default"  # ★ Stage 4
+    ) -> List[str]:
+        """대표 의견 추출 (LLM 활용) ★ Stage 4: segment 인자 추가"""
         if not items or not self.genai:
             # LLM 없으면 간단한 추출
             return [item.get("title", "")[:30] for item in items[:3]]
@@ -225,7 +232,17 @@ class ChatbotNewsCommunity:
 대표 의견 3개:
 """
         try:
-            model = self.genai.GenerativeModel('gemini-2.5-flash')
+            # ★ Stage 4: segment 합성된 system_instruction 적용
+            base_instruction = (
+                "당신은 한국 주식시장 전문 애널리스트입니다. "
+                "초보 투자자가 이해할 수 있도록 쉽고 친근하게 설명합니다. "
+                "매수/매도 추천은 하지 않고 정보 제공만 합니다."
+            )
+            system_instruction = build_system_instruction(base_instruction, segment)
+            model = self.genai.GenerativeModel(
+                'gemini-2.5-flash',
+                system_instruction=system_instruction
+            )
             response = model.generate_content(prompt)
             import re
             opinions = []
@@ -264,14 +281,16 @@ class ChatbotNewsCommunity:
     def get_news_summary(
         self,
         symbol: str,
-        company_name: str
+        company_name: str,
+        segment: str = "default"  # ★ Stage 4
     ) -> Dict:
         """
-        뉴스 요약 (챗봇용)
+        뉴스 요약 (챗봇용) ★ Stage 4: segment 인자 추가
 
         Args:
             symbol: 종목코드
             company_name: 회사명
+            segment: 사용자 세그먼트 라벨 (기본값 "default" → 기존 동작 유지)
 
         Returns:
             {
@@ -306,8 +325,8 @@ class ChatbotNewsCommunity:
         # 투자 영향도 HIGH/MEDIUM 뉴스만 선택
         filtered_news = self._filter_high_impact_news(items)
 
-        # 핵심 이슈로 변환 (3-5개)
-        key_issues = self._convert_to_key_issues(filtered_news[:5], company_name)
+        # 핵심 이슈로 변환 (3-5개) ★ Stage 4: segment 전달
+        key_issues = self._convert_to_key_issues(filtered_news[:5], company_name, segment=segment)
 
         return {
             "symbol": symbol,
@@ -315,7 +334,8 @@ class ChatbotNewsCommunity:
             "key_issues": key_issues,
             "timestamp": "최근",
             "web_url": f"https://jutopia.com/stock/{symbol}/news",
-            "fetched_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            "fetched_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "segment": segment,  # ★ Stage 4: 디버깅/캐싱용
         }
 
     def _filter_high_impact_news(self, items: List[Dict]) -> List[Dict]:
@@ -345,8 +365,10 @@ class ChatbotNewsCommunity:
         filtered.sort(key=lambda x: 0 if x.get("impact") == "HIGH" else 1)
         return filtered
 
-    def _convert_to_key_issues(self, items: List[Dict], company_name: str) -> List[Dict]:
-        """뉴스를 핵심 이슈로 변환"""
+    def _convert_to_key_issues(
+        self, items: List[Dict], company_name: str, segment: str = "default"  # ★ Stage 4
+    ) -> List[Dict]:
+        """뉴스를 핵심 이슈로 변환 ★ Stage 4: segment 인자 추가"""
         if not items or not self.genai:
             # LLM 없으면 제목 그대로
             return [
@@ -384,7 +406,17 @@ class ChatbotNewsCommunity:
 핵심 이슈 요약:
 """
         try:
-            model = self.genai.GenerativeModel('gemini-2.5-flash')
+            # ★ Stage 4: segment 합성된 system_instruction 적용
+            base_instruction = (
+                "당신은 한국 주식시장 전문 애널리스트입니다. "
+                "초보 투자자가 이해할 수 있도록 쉽고 친근하게 설명합니다. "
+                "매수/매도 추천은 하지 않고 정보 제공만 합니다."
+            )
+            system_instruction = build_system_instruction(base_instruction, segment)
+            model = self.genai.GenerativeModel(
+                'gemini-2.5-flash',
+                system_instruction=system_instruction
+            )
             response = model.generate_content(prompt)
             import re
             summaries = []
@@ -643,3 +675,4 @@ if __name__ == "__main__":
     print("=" * 60)
     print("✅ 테스트 완료")
     print("=" * 60)
+

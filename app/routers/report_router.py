@@ -53,11 +53,12 @@ def get_report(request: ReportRequest):
 class ChatbotReportRequest(BaseModel):
     mode: str
     ticker: Optional[str] = ""
-    uuid: Optional[str] = ""          # 현재 미사용
+    uuid: Optional[str] = ""
     section: Optional[str] = ""
-    user_name: Optional[str] = "사용자"   # 현재 chatbot_stock_report.py에서는 실제 사용 안 함
+    user_name: Optional[str] = "사용자"
     list_type: Optional[str] = ""
     stocks: Optional[List[str]] = None
+    segment: Optional[str] = "default"   # ★ Stage 4 신규
 
 
 # ---------------------------
@@ -152,8 +153,6 @@ def _to_bot_list_type(value: str) -> str:
     chatbot_stock_report.py 기준으로 변환
     - favorite
     - holding
-
-    라우터/외부 요청에서 watchlist, holdings가 들어와도 허용
     """
     mapping = {
         "watchlist": "favorite",
@@ -175,10 +174,11 @@ def chatbot_report(req: ChatbotReportRequest):
     section = (req.section or "").strip()
     list_type = (req.list_type or "").strip()
     stocks = req.stocks or []
+    segment = (req.segment or "default").strip()   # ★ Stage 4
 
     bot = ChatbotStockReport()
 
-    # ---- 고정 화면 ----
+    # ---- 고정 화면 (segment 무관) ----
     if mode == "entry":
         return bot.format_entry_for_kakao()
 
@@ -194,13 +194,11 @@ def chatbot_report(req: ChatbotReportRequest):
     if mode == "stock_not_in_list":
         return bot.format_stock_not_in_list_for_kakao()
 
-    # ---- 관심/보유 목록 화면 ----
+    # ---- 관심/보유 목록 (segment 무관) ----
     if mode in ("watchlist", "holdings"):
         bot_list_type = _to_bot_list_type(mode)
-
         if stocks:
             return bot.format_stock_list_for_kakao(stocks, bot_list_type)
-
         return bot.format_empty_list_for_kakao(bot_list_type)
 
     if mode == "stock_list":
@@ -221,7 +219,7 @@ def chatbot_report(req: ChatbotReportRequest):
             )
         return bot.format_empty_list_for_kakao(bot_list_type)
 
-    # ---- summary ----
+    # ---- summary (★ segment 사용) ----
     if mode == "summary":
         if not ticker:
             return bot.format_input_prompt_for_kakao()
@@ -231,15 +229,15 @@ def chatbot_report(req: ChatbotReportRequest):
             return bot.format_stock_not_found_for_kakao()
 
         company_name = _resolve_company_name(bot, symbol, fallback="종목")
-        summary_dict = bot.get_report_summary(symbol, company_name)
+        summary_dict = bot.get_report_summary(symbol, company_name, segment=segment)  # ★
 
         return bot.format_summary_for_kakao(summary_dict)
 
-    # ---- topic_menu ----
+    # ---- topic_menu (segment 무관) ----
     if mode == "topic_menu":
         return bot.format_topic_menu_for_kakao()
 
-    # ---- section ----
+    # ---- section (★ segment 사용) ----
     if mode == "section":
         if not ticker:
             raise HTTPException(status_code=400, detail="ticker is required for section")
@@ -265,10 +263,11 @@ def chatbot_report(req: ChatbotReportRequest):
             company_name=company_name,
             section=section_key,
             raw_data=None,
+            segment=segment,   # ★
         )
         return bot.format_section_for_kakao(detail_dict)
 
-    # ---- all_sections ----
+    # ---- all_sections (★ segment 사용) ----
     if mode == "all_sections":
         if not ticker:
             raise HTTPException(status_code=400, detail="ticker is required for all_sections")
@@ -278,7 +277,7 @@ def chatbot_report(req: ChatbotReportRequest):
             return bot.format_stock_not_found_for_kakao()
 
         company_name = _resolve_company_name(bot, symbol, fallback="종목")
-        all_sections_dict = bot.get_all_sections(symbol, company_name)
+        all_sections_dict = bot.get_all_sections(symbol, company_name, segment=segment)  # ★
 
         return bot.format_all_sections_for_kakao(all_sections_dict)
 

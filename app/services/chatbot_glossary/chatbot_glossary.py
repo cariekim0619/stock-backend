@@ -1,14 +1,3 @@
-"""
-Chatbot_03 주식 용어 사전 API
-챗봇 기획에 맞춘 용어 검색 및 카카오톡 응답 포맷
-
-기획:
-- 4개 카테고리 + 용어 직접 입력
-- KB(glossary.json) 기반 검색 + RAG(LLM) 포맷 재구성
-- 고정 출력 포맷: ➊정의 ➋언제쓰이나요 ➌예시 ➍주의할점 ➎헷갈리기쉬운용어
-- 검색 결과 분기: 1개 매칭 / 여러 의미 / 검색 실패
-"""
-
 import os
 import re
 from typing import Dict, List, Optional
@@ -17,26 +6,51 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+# ============================================================
+# Lambda 명령 상수와 완전 일치 — _normalize_glossary_payload 무력화
+# ============================================================
+# Lambda 측 정의(live_lambda_function_patched_v4.py 라인 1535~1537):
+#   _DICT_INPUT_CMD          = "용어 직접 입력"
+#   _DICT_OTHER_TERM_CMD     = "다른 용어 질문"
+#   _DICT_OTHER_CATEGORY_CMD = "다른 카테고리 보기"
+#   CMD_MAIN                 = "메인으로"
+# 본 EC2 코드는 이 라벨을 그대로 사용함.
+CMD_INPUT = "용어 직접 입력"
+CMD_OTHER_TERM = "다른 용어 질문"
+CMD_OTHER_CATEGORY = "다른 카테고리 보기"
+CMD_MAIN = "메인으로"
+
+
 class ChatbotGlossary:
     """
-    Chatbot_03 주식 용어 사전 데이터 프로바이더
+    Chatbot_03 주식 용어 사전 데이터 프로바이더 (v6 일원화)
 
     기능:
     - search_and_explain(): 용어 검색 + RAG 설명 생성
     - format_entry_for_kakao(): 기능 진입 안내
     - format_category_for_kakao(): 카테고리별 용어 목록
-    - format_explanation_for_kakao(): 용어 설명 카카오 응답
-    - format_disambiguate_for_kakao(): 여러 의미 선택 카카오 응답
-    - format_not_found_for_kakao(): 검색 실패 카카오 응답
+    - format_explanation_for_kakao(): 용어 설명 카카오톡 응답 (2말풍선 분할)
+    - format_disambiguate_for_kakao(): 여러 의미 선택 카카오톡 응답
+    - format_not_found_for_kakao(): 검색 실패 카카오톡 응답
     """
 
-    # 카카오 simpleText 최대 글자 수를 고려한 안전 길이
-    # 보수적으로 700자 내외를 목표로 생성하고
-    # 마지막 후처리에서는 900자 기준으로 한 번 더 잘라줍니다.
-    MAX_PROMPT_RESPONSE_CHARS = 700
-    MAX_FINAL_RESPONSE_CHARS = 900
+    # 카카오톡 simpleText 1개당 안전 길이 (실제 한도는 1,000자, 안전마진 20자)
+    SIMPLE_TEXT_MAX = 980
 
-    # 기획안 카테고리별 대표 용어
+    # 풍선 1개 prompt 응답 가이드 (LLM 사용 시)
+    MAX_PROMPT_RESPONSE_CHARS = 700
+
+    # 분할 마커
+    SECTION_MARKERS = ("➊", "➋", "➌", "➍", "➎")
+    SPLIT_MARKER = "➍"
+
+    # multiple 분기 신뢰도 임계치 (Stage 1 v5와 동일)
+    MULTIPLE_SCORE_THRESHOLD = 8
+
+    # outputs 최대 개수 (카카오 i 제약: 3)
+    MAX_OUTPUTS = 3
+
+    # 카테고리별 대표 용어
     CATEGORIES = {
         "지표 · 숫자 용어": [
             "PER", "PBR", "ROE", "EPS", "배당수익률", "시가총액",
@@ -52,12 +66,18 @@ class ChatbotGlossary:
         ],
     }
 
-    # 퀵 버튼 표시용 라벨 (검색키 → 표시명)
+    # 톡 버튼 표시용 라벨
     DISPLAY_LABELS = {
         "시장가": "시장가 / 지정가",
         "이동평균": "이동평균선(MA)",
         "지지선": "지지선 / 저항선",
     }
+
+    # 결과 화면 안내 문구 (Lambda _append_glossary_result_guides 대체)
+    RESULT_GUIDE_TEXT = (
+        "궁금한 용어를 다시 입력해 주세요.\n"
+        "다른 용어도 질문해보세요."
+    )
 
     def __init__(self):
         """Initialize"""
@@ -76,29 +96,13 @@ class ChatbotGlossary:
         else:
             self.genai = None
 
-    # ========================================
+    # ====================================================
     # 메인 API
-    # ========================================
+    # ====================================================
 
     def search_and_explain(self, user_input: str) -> Dict:
-        """
-        용어 검색 + 설명 생성 (메인 API)
-
-        Args:
-            user_input: 사용자 입력 (단어 또는 문장)
-
-        Returns:
-            {
-                "status": "found" | "multiple" | "not_found",
-                "term": "PER",                  # found인 경우
-                "explanation": "📖 PER...",     # found인 경우
-                "kb_data": {...},               # found인 경우 원본 KB 데이터
-                "candidates": [...],            # multiple인 경우
-            }
-        """
+        """v5와 동일 — 알고리즘 변경 없음"""
         query = user_input.strip()
-
-        # 빈 입력 방지
         if not query:
             return {"status": "not_found"}
 
@@ -127,10 +131,11 @@ class ChatbotGlossary:
                 }
 
         # 3. 유사 검색
-        similar = self.glossary.find_similar(query, limit=5)
+        similar = self._find_similar_with_score(query, limit=5)
         if similar:
-            # 상위 1개가 매우 유사 → 바로 설명
             top = similar[0]
+            top_score = top.get("score", 0)
+
             if (
                 query.lower() in top["term"].lower()
                 or top["term"].lower() in query.lower()
@@ -145,30 +150,68 @@ class ChatbotGlossary:
                         "kb_data": top_entry,
                     }
 
-            # 여러 후보 → 선택
-            return {
-                "status": "multiple",
-                "candidates": similar[:4],
-            }
+            if top_score >= self.MULTIPLE_SCORE_THRESHOLD:
+                candidates = []
+                for r in similar[:4]:
+                    candidates.append({
+                        "term": r["term"],
+                        "full_name": r.get("full_name", ""),
+                        "category": r.get("category", ""),
+                    })
+                return {
+                    "status": "multiple",
+                    "candidates": candidates,
+                }
 
-        # 4. 못 찾음
+            return {"status": "not_found"}
+
         return {"status": "not_found"}
 
     def get_category_terms(self, category_name: str) -> Optional[List[str]]:
-        """카테고리별 용어 목록 반환"""
         return self.CATEGORIES.get(category_name)
 
-    # ========================================
-    # 공통 유틸
-    # ========================================
+    # ====================================================
+    # 공통 유틸 (v5와 동일)
+    # ====================================================
+
+    def _find_similar_with_score(self, query: str, limit: int = 5) -> List[Dict]:
+        results = []
+        query_lower = query.lower()
+
+        for key, value in self.glossary._data.items():
+            score = 0
+            full_name = value.get("full_name", "")
+            english = value.get("english", "")
+            description = value.get("description", "")
+
+            key_lower = key.lower()
+            full_lower = full_name.lower()
+            eng_lower = english.lower()
+            desc_lower = description.lower()
+
+            if key_lower and (query_lower in key_lower or key_lower in query_lower):
+                score += 10
+            if full_lower and (query_lower in full_lower or full_lower in query_lower):
+                score += 8
+            if eng_lower and (query_lower in eng_lower or eng_lower in query_lower):
+                score += 6
+            if desc_lower and query_lower in desc_lower:
+                score += 3
+
+            if score > 0:
+                results.append({
+                    "term": key,
+                    "full_name": full_name,
+                    "category": value.get("category", ""),
+                    "score": score,
+                })
+
+        results.sort(key=lambda x: x["score"], reverse=True)
+        return results[:limit]
 
     def _safe_truncate_text(self, text: str, max_len: int = None) -> str:
-        """
-        카카오톡 메시지 길이 초과 방지용 후처리
-        너무 길면 잘라서 말줄임 처리
-        """
         if max_len is None:
-            max_len = self.MAX_FINAL_RESPONSE_CHARS
+            max_len = self.SIMPLE_TEXT_MAX
 
         if not text:
             return text
@@ -176,177 +219,84 @@ class ChatbotGlossary:
         if len(text) <= max_len:
             return text
 
-        # 너무 길면 자연스럽게 잘라내기
         trimmed = text[:max_len].rstrip()
 
-        # 마지막 줄이 어중간하게 끊기면 정리
         if "\n" in trimmed:
             last_newline = trimmed.rfind("\n")
             if last_newline > max_len - 80:
                 trimmed = trimmed[:last_newline].rstrip()
 
-        return trimmed + "\n..."
+        return trimmed + "\n…"
 
-    def _clean_llm_text(self, text: str) -> str:
+    def _truncate_at_word_boundary(self, text: str, max_len: int) -> str:
         """
-        LLM 응답 후처리
-        - markdown bold 제거
-        - 불필요한 공백 정리
+        v7 신규: rt_desc 같은 한 줄 설명을 자연스러운 종결로 자름.
+        - 길이가 max_len 이하면 그대로 반환
+        - 초과 시 max_len 안에서 가장 가까운 종결 부호(., 다, 요, 음, 임) 위치에서 자름
+        - 적절한 종결점이 없으면 max_len에서 자르고 "..." 부착
         """
         if not text:
             return text
+        s = text.strip()
+        if len(s) <= max_len:
+            return s
 
-        # markdown bold 제거
+        # 종결 부호 후보 — 한국어 문장 종결 우선
+        candidates = ["다.", "요.", "음.", "임.", "다", "요", "."]
+        window = s[:max_len]
+        best_pos = -1
+        for marker in candidates:
+            pos = window.rfind(marker)
+            if pos > best_pos:
+                best_pos = pos + len(marker)
+        # max_len의 60% 이전에서 잘리면 너무 짧으니 그냥 max_len에서 자름
+        if best_pos >= int(max_len * 0.6):
+            return s[:best_pos].rstrip()
+        return s[:max_len].rstrip() + "..."
+
+    def _split_explanation_by_marker(self, text: str) -> tuple:
+        if not text:
+            return text, ""
+
+        idx = text.find(self.SPLIT_MARKER)
+        if idx < 0:
+            return text, ""
+
+        head = text[:idx].rstrip()
+        body = text[idx:].strip()
+
+        if len(head) < 30 or len(body) < 30:
+            return text, ""
+
+        return head, body
+
+    def _clean_llm_text(self, text: str) -> str:
+        if not text:
+            return text
         text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
-
-        # 줄 끝 공백 제거
         text = "\n".join(line.rstrip() for line in text.splitlines())
-
         return text.strip()
 
-    # ========================================
-    # RAG: 용어 설명 생성
-    # ========================================
+    def _append_result_guide(self, text: str) -> str:
+        """
+        결과 화면 마지막 simpleText에 안내 문구 부착.
+        Lambda _append_glossary_result_guides 의 대체.
+        """
+        base = (text or "").rstrip()
+        guide = self.RESULT_GUIDE_TEXT
+        # 이미 포함되어 있으면 중복 안 함
+        if "다른 용어도 질문해보세요" in base or "궁금한 용어를 다시 입력" in base:
+            return base
+        return self._safe_truncate_text(f"{base}\n\n{guide}", max_len=self.SIMPLE_TEXT_MAX)
+
+    # ====================================================
+    # RAG (v5와 동일 — _generate_explanation는 _fallback_explanation만 호출)
+    # ====================================================
 
     def _generate_explanation(self, entry: Dict) -> str:
-        """
-        KB 데이터 → 기획안 고정 포맷으로 변환 (RAG)
-
-        출력 포맷:
-        📖 [용어명]에 대한 설명이에요.
-
-        ➊ 정의
-        - ...
-
-        ➋ 언제 쓰이나요 ?
-        - ...
-
-        ➌ 예시
-        - ...
-
-        ➍ 주의할 점
-        - ...
-
-        ➎ 헷갈리기 쉬운 용어
-        - A : ...
-        - B : ...
-        """
         return self._fallback_explanation(entry)
 
-    def _rag_explanation(self, entry: Dict) -> Optional[str]:
-        """LLM 기반 RAG 설명 생성"""
-        term = entry.get("term", "")
-        full_name = entry.get("full_name", "")
-        description = entry.get("description", "")
-        formula = entry.get("formula", "")
-        example = entry.get("example", "")
-        interpretation = entry.get("interpretation", {})
-        related_terms = entry.get("related_terms", [])
-
-        # KB 데이터 조합
-        kb_text = f"용어: {term}"
-        if full_name and full_name != term:
-            kb_text += f" ({full_name})"
-        kb_text += f"\n정의: {description}"
-
-        if formula:
-            kb_text += f"\n공식: {formula}"
-
-        if example:
-            kb_text += f"\n예시: {example}"
-
-        if interpretation:
-            kb_text += "\n해석:"
-            for k, v in interpretation.items():
-                kb_text += f"\n  - {k}: {v}"
-
-        # 연관 용어 정보
-        related_info = []
-        for rt in related_terms[:2]:
-            rt_entry = self.glossary.lookup(rt)
-            if rt_entry:
-                rt_desc = rt_entry.get("description", "")[:60]
-                related_info.append(
-                    f"{rt} ({rt_entry.get('full_name', '')}): {rt_desc}"
-                )
-            else:
-                related_info.append(rt)
-
-        rt_1 = related_terms[0] if len(related_terms) > 0 else "A"
-        rt_2 = related_terms[1] if len(related_terms) > 1 else "B"
-
-        prompt = f"""아래 용어 사전 데이터를 바탕으로 주식 초보자도 이해할 수 있는 설명을 작성해주세요.
-
-[용어 사전 데이터]
-{kb_text}
-
-[연관 용어]
-{chr(10).join(related_info) if related_info else '없음'}
-
-[출력 형식 — 반드시 아래 형식 그대로 따라주세요]
-➊ 정의
-- (객관적 정의 1문장. 공식이 있으면 포함)
-
-➋ 언제 쓰이나요 ?
-- (이 용어가 실제로 사용되는 대표적인 상황 1~2문장)
-
-➌ 예시
-- (사실 기반 구체적인 예시 1~2문장)
-
-➍ 주의할 점
-- (초보자가 오해하기 쉬운 포인트 1~2문장)
-
-➎ 헷갈리기 쉬운 용어
-- {rt_1} : (차이점 1문장)
-- {rt_2} : (차이점 1문장)
-
-[규칙]
-- 위에 제공된 용어 사전 데이터만 근거로 작성하세요
-- 새로운 정의를 만들지 마세요
-- 투자 판단이나 의견을 제시하지 마세요
-- 쉽고 친근한 말투를 사용하세요
-- 각 항목은 1~2문장으로 간결하게 작성하세요
-- 전체 답변은 {self.MAX_PROMPT_RESPONSE_CHARS}자 이내로 작성하세요
-- 카카오톡 메시지 길이 제한을 고려하여 불필요하게 길게 쓰지 마세요"""
-
-        try:
-            model = self.genai.GenerativeModel(
-                "gemini-2.5-flash",
-                system_instruction=(
-                    "당신은 주식 용어 사전 도우미입니다. "
-                    "검증된 용어 데이터를 바탕으로 초보자에게 쉽게 설명합니다. "
-                    "새로운 정의를 만들거나 투자 판단을 제시하지 않습니다. "
-                    f"전체 답변은 반드시 {self.MAX_PROMPT_RESPONSE_CHARS}자 이내로 작성합니다. "
-                    "출력 형식은 ➊정의 ➋언제 쓰이나요 ➌예시 ➍주의할 점 ➎헷갈리기 쉬운 용어 형식을 유지합니다."
-                )
-            )
-
-            response = model.generate_content(
-                prompt,
-                generation_config={
-                    "temperature": 0.2,
-                    "max_output_tokens": 512,
-                }
-            )
-
-            text = self._clean_llm_text(response.text)
-
-            # 포맷 검증
-            if "➊" in text and "➋" in text:
-                display_name = term
-                if full_name and full_name != term:
-                    display_name = f"{term} ({full_name})"
-
-                final_text = f"📖 {display_name}에 대한 설명이에요.\n\n{text}"
-                return self._safe_truncate_text(final_text)
-
-            return None
-
-        except Exception:
-            return None
-
     def _fallback_explanation(self, entry: Dict) -> str:
-        """LLM 불가 시 KB 데이터 직접 포맷"""
         term = entry.get("term", "")
         full_name = entry.get("full_name", "")
         description = entry.get("description", "")
@@ -367,7 +317,7 @@ class ChatbotGlossary:
             definition += f"\n  {formula}"
         text += f"➊ 정의\n- {definition}\n\n"
 
-        # ➋ 언제 쓰이나요
+        # ➋ 어떤 쓰임이나요
         usage = ""
         for key in ["use", "benchmark", "trading"]:
             if key in interpretation:
@@ -381,7 +331,7 @@ class ChatbotGlossary:
         if not usage:
             usage = f"{term}은(는) 주식 분석에서 자주 사용되는 용어입니다."
 
-        text += f"➋ 언제 쓰이나요 ?\n- {usage}\n\n"
+        text += f"➋ 어떤 쓰임이나요 ?\n- {usage}\n\n"
 
         # ➌ 예시
         if example:
@@ -407,7 +357,9 @@ class ChatbotGlossary:
             for rt in related_terms[:2]:
                 rt_entry = self.glossary.lookup(rt)
                 if rt_entry:
-                    rt_desc = rt_entry.get("description", "")[:50]
+                    # v7: 50→80자로 늘리고 자연 종결로 자름 (잘림 방지)
+                    rt_desc_full = rt_entry.get("description", "")
+                    rt_desc = self._truncate_at_word_boundary(rt_desc_full, max_len=80)
                     text += f"- {rt} : {rt_desc}\n"
                 else:
                     text += f"- {rt}\n"
@@ -417,20 +369,16 @@ class ChatbotGlossary:
         return text.rstrip()
 
     def _extract_term_from_sentence(self, sentence: str) -> Optional[str]:
-        """문장에서 핵심 용어 추출"""
-        # 1. 영문 약어 추출 (PER, RSI 등)
         eng_matches = re.findall(r"[A-Za-z]{2,}", sentence)
         for m in eng_matches:
             if self.glossary.lookup(m):
                 return m
 
-        # 2. KB 용어와 직접 매칭 (긴 것부터)
         all_terms = self.glossary.get_all_terms()
         for t in sorted(all_terms, key=len, reverse=True):
             if t in sentence:
                 return t
 
-        # 3. LLM 추출
         if self.genai:
             try:
                 model = self.genai.GenerativeModel("gemini-2.5-flash")
@@ -451,15 +399,17 @@ class ChatbotGlossary:
 
         return None
 
-    # ========================================
-    # 카카오톡 포맷
-    # ========================================
+    # ====================================================
+    # 카카오톡 포맷 (★ v6 일원화 ★)
+    # ====================================================
 
     def format_entry_for_kakao(self) -> Dict:
         """
-        기능 진입 안내 카카오 응답
+        기능 진입 안내 — 4개 카테고리 + 용어 직접 입력 + 메인으로
 
-        기획: 주식 용어 사전 버튼 클릭 시
+        Lambda 명령 라벨로 통일:
+          - "용어 직접 입력" (CMD_INPUT) → Lambda _DICT_INPUT_CMD와 일치
+          - "메인으로" (CMD_MAIN) → Lambda CMD_MAIN과 일치
         """
         return {
             "version": "2.0",
@@ -470,142 +420,118 @@ class ChatbotGlossary:
                             "📖 주식 용어 사전 입니다 :)\n"
                             "아래에 있는 내용을 담아 용어를 설명해요.\n\n"
                             "• 정확한 정의\n"
-                            "• 언제 쓰이는지\n"
+                            "• 어떤 쓰임인지\n"
                             "• 헷갈리기 쉬운 포인트\n\n"
-                            "하단의 퀵 버튼을 눌러\n"
+                            "하단의 톡 버튼을 눌러\n"
                             "궁금한 용어를 확인하세요 !"
                         )
                     }
                 }],
                 "quickReplies": [
-                    {
-                        "action": "block",
-                        "label": "지표 · 숫자 용어",
-                        "messageText": "지표 · 숫자 용어",
-                        "blockId": "glossary_category_block",
-                    },
-                    {
-                        "action": "block",
-                        "label": "매수 · 매도 관련 용어",
-                        "messageText": "매수 · 매도 관련 용어",
-                        "blockId": "glossary_category_block",
-                    },
-                    {
-                        "action": "block",
-                        "label": "손익 · 수익률 관련",
-                        "messageText": "손익 · 수익률 관련",
-                        "blockId": "glossary_category_block",
-                    },
-                    {
-                        "action": "block",
-                        "label": "차트 · 기술적 용어",
-                        "messageText": "차트 · 기술적 용어",
-                        "blockId": "glossary_category_block",
-                    },
-                    {
-                        "action": "block",
-                        "label": "용어 직접 입력",
-                        "messageText": "용어 직접 입력",
-                        "blockId": "glossary_input_block",
-                    },
-                    {
-                        "action": "block",
-                        "label": "메인으로",
-                        "messageText": "메인으로",
-                        "blockId": "main_block",
-                    },
+                    self._qr("지표 · 숫자 용어", "지표 · 숫자 용어", "glossary_category_block"),
+                    self._qr("매수 · 매도 관련 용어", "매수 · 매도 관련 용어", "glossary_category_block"),
+                    self._qr("손익 · 수익률 관련", "손익 · 수익률 관련", "glossary_category_block"),
+                    self._qr("차트 · 기술적 용어", "차트 · 기술적 용어", "glossary_category_block"),
+                    self._qr(CMD_INPUT, CMD_INPUT, "glossary_input_block"),
+                    self._qr(CMD_MAIN, CMD_MAIN, "main_block"),
                 ],
             },
         }
 
     def format_category_for_kakao(self, category_name: str) -> Dict:
         """
-        카테고리별 용어 목록 카카오 응답
+        카테고리별 용어 목록
 
-        기획: 카테고리 선택 시 해당 용어 리스트 퀵 버튼
+        결과 화면 quickReplies — Lambda 명령 라벨로 통일:
+          - 용어 6개 (블록 진입)
+          - CMD_OTHER_CATEGORY ("다른 카테고리 보기")
+          - CMD_MAIN ("메인으로")
+          ※ "다시 입력" / "종료" 는 사용하지 않음
         """
         terms = self.CATEGORIES.get(category_name, [])
-
-        # 카테고리 표시명
         display_category = category_name.replace(" · ", "·")
 
         quick_replies = []
         for term in terms:
             label = self.DISPLAY_LABELS.get(term, term)
-            quick_replies.append({
-                "action": "block",
-                "label": label,
-                "messageText": term,
-                "blockId": "glossary_term_block",
-            })
+            quick_replies.append(self._qr(label, term, "glossary_term_block"))
 
-        quick_replies.append({
-            "action": "block",
-            "label": "다른 카테고리 보기",
-            "messageText": "다른 카테고리",
-            "blockId": "glossary_entry_block",
-        })
-        quick_replies.append({
-            "action": "block",
-            "label": "종료",
-            "messageText": "종료",
-            "blockId": "end_block",
-        })
+        quick_replies.append(self._qr(CMD_OTHER_CATEGORY, CMD_OTHER_CATEGORY, "glossary_entry_block"))
+        quick_replies.append(self._qr(CMD_MAIN, CMD_MAIN, "main_block"))
+
+        # 결과 화면용 안내 문구 부착 (Lambda _append 대체)
+        body_text = (
+            f"📖 {display_category} 중\n"
+            "어떤 개념이 궁금하신가요?\n\n"
+            "하단에 6개의 예시 단어가 있어요.\n"
+            "버튼을 눌러 용어를 확인하거나,\n"
+            "용어를 직접 입력해주세요 !"
+        )
 
         return {
             "version": "2.0",
             "template": {
-                "outputs": [{
-                    "simpleText": {
-                        "text": (
-                            f"📖 {display_category} 중\n"
-                            "어떤 개념이 궁금하신가요?\n\n"
-                            "하단에 6개의 예시 단어가 있어요.\n"
-                            "버튼을 눌러 용어를 확인하거나,\n"
-                            "용어를 직접 입력해주세요 !"
-                        )
-                    }
-                }],
+                "outputs": [{"simpleText": {"text": self._safe_truncate_text(body_text)}}],
                 "quickReplies": quick_replies,
             },
         }
 
     def format_explanation_for_kakao(self, result: Dict) -> Dict:
         """
-        용어 설명 카카오 응답
+        용어 설명 — v7: 3 simpleText 분할
 
-        기획: 용어 설명 후 [다른 용어 질문 / 종료] 퀵 버튼
+        풍선 구조:
+          [1] 📖 헤더 + ➊ 정의 + ➋ 쓰임 + ➌ 예시
+          [2] ➍ 주의할 점 + ➎ 헷갈리기 쉬운 용어
+          [3] 안내 문구 ("궁금한 용어를 다시 입력해 주세요. 다른 용어도 질문해보세요.")
+
+        quickReplies — Lambda 명령 라벨로 통일:
+          - CMD_OTHER_TERM ("다른 용어 질문")
+          - CMD_MAIN ("메인으로")
         """
+        full_text = result.get("explanation") or ""
+        head, body = self._split_explanation_by_marker(full_text)
+
+        outputs = []
+
+        # 풍선 [1]: head (📖 ~ ➌ 예시)
+        if head:
+            outputs.append({"simpleText": {"text": self._safe_truncate_text(head)}})
+
+        # 풍선 [2]: body (➍ ~ ➎) — 안내문 부착 X
+        if body:
+            outputs.append({"simpleText": {"text": self._safe_truncate_text(body)}})
+
+        # 풍선 [3]: 안내문 단독
+        if outputs:
+            outputs.append({"simpleText": {"text": self.RESULT_GUIDE_TEXT}})
+        else:
+            # 안전망: 분할 실패 시 단일 풍선 + 안내문 한 풍선
+            outputs = [
+                {"simpleText": {"text": self._safe_truncate_text(full_text)}},
+                {"simpleText": {"text": self.RESULT_GUIDE_TEXT}},
+            ]
+
         return {
             "version": "2.0",
             "template": {
-                "outputs": [{
-                    "simpleText": {
-                        "text": self._safe_truncate_text(result["explanation"])
-                    }
-                }],
+                "outputs": outputs[:self.MAX_OUTPUTS],
                 "quickReplies": [
-                    {
-                        "action": "block",
-                        "label": "다른 용어 질문",
-                        "messageText": "다른 용어",
-                        "blockId": "glossary_entry_block",
-                    },
-                    {
-                        "action": "block",
-                        "label": "종료",
-                        "messageText": "종료",
-                        "blockId": "end_block",
-                    },
+                    self._qr(CMD_OTHER_TERM, CMD_OTHER_TERM, "glossary_entry_block"),
+                    self._qr(CMD_MAIN, CMD_MAIN, "main_block"),
                 ],
             },
         }
 
     def format_disambiguate_for_kakao(self, candidates: List[Dict]) -> Dict:
         """
-        여러 의미 선택 카카오 응답
+        여러 의미 선택
 
-        기획: 여러 의미 → 선택 퀵 버튼 + 다시 입력
+        quickReplies — Lambda 명령 라벨로 통일:
+          - 후보 4개 (블록 진입)
+          - CMD_INPUT ("용어 직접 입력")
+          - CMD_MAIN ("메인으로")
+          ※ "다시 입력" 라벨은 v6에서 폐기 (Lambda가 어차피 제거함)
         """
         quick_replies = []
         for c in candidates[:4]:
@@ -614,181 +540,164 @@ class ChatbotGlossary:
             label = f"{term} ({full_name})" if full_name else term
             if len(label) > 20:
                 label = label[:17] + "..."
-            quick_replies.append({
-                "action": "block",
-                "label": label,
-                "messageText": term,
-                "blockId": "glossary_term_block",
-            })
+            quick_replies.append(self._qr(label, term, "glossary_term_block"))
 
-        quick_replies.append({
-            "action": "block",
-            "label": "다시 입력",
-            "messageText": "다시 입력",
-            "blockId": "glossary_input_block",
-        })
+        quick_replies.append(self._qr(CMD_INPUT, CMD_INPUT, "glossary_input_block"))
+        quick_replies.append(self._qr(CMD_MAIN, CMD_MAIN, "main_block"))
 
         return {
             "version": "2.0",
             "template": {
-                "outputs": [{
-                    "simpleText": {
-                        "text": (
-                            "⚠️ 입력하신 용어가\n"
-                            "여러 의미로 사용될 수 있어요\n\n"
-                            "아래의 의미 중에서\n"
-                            "어떤 의미를 자세하게 알고 싶으신가요?"
-                        )
-                    }
-                }],
+                "outputs": [{"simpleText": {"text": (
+                    "🔍 비슷한 용어가 여러 개 있어요\n"
+                    "아래 중에서 알고 싶은 용어를 골라주세요.\n\n"
+                    "원하는 용어가 없다면\n"
+                    "용어를 직접 입력해도 좋아요."
+                )}}],
                 "quickReplies": quick_replies,
             },
         }
 
     def format_not_found_for_kakao(self) -> Dict:
         """
-        검색 실패 카카오 응답
+        검색 실패
 
-        기획: 못 찾음 안내 + 카테고리 퀵 버튼
+        quickReplies — Lambda 명령 라벨로 통일:
+          - CMD_INPUT ("용어 직접 입력")
+          - 카테고리 4개
+          - CMD_MAIN ("메인으로")
         """
         return {
             "version": "2.0",
             "template": {
-                "outputs": [{
-                    "simpleText": {
-                        "text": (
-                            "⚠️ 해당 용어를\n"
-                            "사전에서 찾지 못했어요\n\n"
-                            "공식 용어가 아닐 수 있어요.\n"
-                            "다른 표현으로 다시 입력해 주세요."
-                        )
-                    }
-                }],
+                "outputs": [{"simpleText": {"text": (
+                    "⚠️ 해당 용어를\n"
+                    "사전에서 찾지 못했어요\n\n"
+                    "공식 용어가 아닐 수 있어요.\n"
+                    "다른 표현으로 다시 입력해 주세요."
+                )}}],
                 "quickReplies": [
-                    {
-                        "action": "block",
-                        "label": "다시 입력",
-                        "messageText": "다시 입력",
-                        "blockId": "glossary_input_block",
-                    },
-                    {
-                        "action": "block",
-                        "label": "지표·숫자 용어",
-                        "messageText": "지표 · 숫자 용어",
-                        "blockId": "glossary_category_block",
-                    },
-                    {
-                        "action": "block",
-                        "label": "거래 관련 용어",
-                        "messageText": "매수 · 매도 관련 용어",
-                        "blockId": "glossary_category_block",
-                    },
-                    {
-                        "action": "block",
-                        "label": "손익 · 수익률 관련",
-                        "messageText": "손익 · 수익률 관련",
-                        "blockId": "glossary_category_block",
-                    },
-                    {
-                        "action": "block",
-                        "label": "차트 · 기술적 용어",
-                        "messageText": "차트 · 기술적 용어",
-                        "blockId": "glossary_category_block",
-                    },
-                    {
-                        "action": "block",
-                        "label": "종료",
-                        "messageText": "종료",
-                        "blockId": "end_block",
-                    },
+                    self._qr(CMD_INPUT, CMD_INPUT, "glossary_input_block"),
+                    self._qr("지표·숫자 용어", "지표 · 숫자 용어", "glossary_category_block"),
+                    self._qr("거래 관련 용어", "매수 · 매도 관련 용어", "glossary_category_block"),
+                    self._qr("손익 · 수익률 관련", "손익 · 수익률 관련", "glossary_category_block"),
+                    self._qr("차트 · 기술적 용어", "차트 · 기술적 용어", "glossary_category_block"),
+                    self._qr(CMD_MAIN, CMD_MAIN, "main_block"),
                 ],
             },
         }
 
+    # ====================================================
+    # quickReply 빌더 (단일 진입점)
+    # ====================================================
 
-# ========================================
+    @staticmethod
+    def _qr(label: str, message_text: str, block_id: Optional[str] = None) -> Dict:
+        """
+        quickReply 단일 빌더. 모든 format_* 가 이걸 거쳐가도록 통일.
+
+        - action="block" + blockId 지정 → 카카오 i 어드민 블록 분기
+        - blockId 없으면 action="message" (단순 텍스트 발화)
+        - label은 카카오 i 표시 길이 제약(통상 14자) 고려해서 호출자가 자름
+        """
+        qr = {
+            "label": label,
+            "messageText": message_text,
+        }
+        if block_id:
+            qr["action"] = "block"
+            qr["blockId"] = block_id
+        else:
+            qr["action"] = "message"
+        return qr
+
+
+# ====================================================
 # 테스트
-# ========================================
+# ====================================================
 
 if __name__ == "__main__":
     import json
 
     print("=" * 60)
-    print("Chatbot_03 주식 용어 사전 테스트")
+    print("Chatbot_03 v6 일원화 테스트")
     print("=" * 60)
-    print()
 
     chatbot = ChatbotGlossary()
-    print(f"KB 용어 수: {chatbot.glossary.get_term_count()}개")
+    print(f"\nKB 용어 수: {chatbot.glossary.get_term_count()}개\n")
+
+    # 1. entry — 라벨이 Lambda 명령과 일치하는지
+    print("[1] format_entry_for_kakao — Lambda 명령 일치 확인")
+    print("-" * 50)
+    entry = chatbot.format_entry_for_kakao()
+    qr_labels = [q["label"] for q in entry["template"]["quickReplies"]]
+    print(f"  quickReplies: {qr_labels}")
+    assert "용어 직접 입력" in qr_labels, "CMD_INPUT 누락"
+    assert "메인으로" in qr_labels, "CMD_MAIN 누락"
+    assert "종료" not in qr_labels, "❌ '종료' 라벨이 남아있음 (v5 잔재)"
+    print("  ✅ 라벨 일원화 정상")
     print()
 
-    # 1. 진입 메시지
-    print("[1단계] 기능 진입")
-    print("-" * 40)
-    entry_resp = chatbot.format_entry_for_kakao()
-    print(entry_resp["template"]["outputs"][0]["simpleText"]["text"])
-    print(f"퀵 버튼: {[q['label'] for q in entry_resp['template']['quickReplies']]}")
-    print()
-
-    # 2. 카테고리 선택
-    print("[2단계] 카테고리 선택: 지표 · 숫자 용어")
-    print("-" * 40)
-    cat_resp = chatbot.format_category_for_kakao("지표 · 숫자 용어")
-    print(cat_resp["template"]["outputs"][0]["simpleText"]["text"])
-    print(f"퀵 버튼: {[q['label'] for q in cat_resp['template']['quickReplies']]}")
-    print()
-
-    # 3. 용어 검색 - 정확 매칭
-    print("[3단계] 용어 검색: PER")
-    print("-" * 40)
+    # 2. found 결과 — 2풍선 + 안내문 부착
+    print("[2] format_explanation_for_kakao — 2풍선 + 안내문")
+    print("-" * 50)
     result = chatbot.search_and_explain("PER")
-    print(f"상태: {result['status']}")
-    if result["status"] == "found":
-        print(result["explanation"][:300] + "...")
-    print()
-
-    # 4. 문장형 질문
-    print("[4단계] 문장형 질문: PER이 높으면 무슨 뜻이야?")
-    print("-" * 40)
-    result = chatbot.search_and_explain("PER이 높으면 무슨 뜻이야?")
-    print(f"상태: {result['status']}")
-    if result["status"] == "found":
-        print(f"매칭 용어: {result['term']}")
-    print()
-
-    # 5. 유사 검색
-    print("[5단계] 유사 검색: 이익")
-    print("-" * 40)
-    result = chatbot.search_and_explain("이익")
-    print(f"상태: {result['status']}")
-    if result["status"] == "multiple":
-        for c in result["candidates"]:
-            print(f"  - {c['term']} ({c.get('full_name', '')})")
-    print()
-
-    # 6. 검색 실패
-    print("[6단계] 검색 실패: 존재하지않는용어")
-    print("-" * 40)
-    result = chatbot.search_and_explain("존재하지않는용어")
-    print(f"상태: {result['status']}")
-    print()
-
-    # 7. 카카오 응답 형식 확인
-    print("[7단계] 카카오 응답 형식")
-    print("-" * 40)
-    result = chatbot.search_and_explain("물타기")
     if result["status"] == "found":
         kakao = chatbot.format_explanation_for_kakao(result)
-        print(json.dumps(kakao, ensure_ascii=False, indent=2)[:600] + "...")
+        outs = kakao["template"]["outputs"]
+        print(f"  outputs: {len(outs)}개")
+        for i, o in enumerate(outs, 1):
+            txt = o["simpleText"]["text"]
+            print(f"  [{i}] {len(txt)}자: ...{txt[-60:]}")
+        # 마지막 풍선에 안내문 들어있는지
+        last_txt = outs[-1]["simpleText"]["text"]
+        if "다른 용어도 질문해보세요" in last_txt or "궁금한 용어를 다시 입력" in last_txt:
+            print("  ✅ 안내 문구 부착됨")
+        else:
+            print("  ⚠️ 안내 문구 누락")
+
+        # quickReplies 확인
+        qr_labels = [q["label"] for q in kakao["template"]["quickReplies"]]
+        print(f"  quickReplies: {qr_labels}")
+        assert "다른 용어 질문" in qr_labels
+        assert "메인으로" in qr_labels
+        print("  ✅ 결과 화면 quickReplies 정상")
     print()
 
-    # 8. 못 찾음 카카오 응답
-    print("[8단계] 못 찾음 카카오 응답")
-    print("-" * 40)
-    not_found = chatbot.format_not_found_for_kakao()
-    print(json.dumps(not_found, ensure_ascii=False, indent=2)[:400])
+    # 3. not_found
+    print("[3] format_not_found_for_kakao")
+    print("-" * 50)
+    nf = chatbot.format_not_found_for_kakao()
+    qr_labels = [q["label"] for q in nf["template"]["quickReplies"]]
+    print(f"  quickReplies: {qr_labels}")
+    assert "다시 입력" not in qr_labels, "❌ '다시 입력' 라벨 남아있음 (v5 잔재)"
+    assert "용어 직접 입력" in qr_labels
+    print("  ✅ '다시 입력' 폐기 정상")
+    print()
+
+    # 4. disambiguate
+    print("[4] format_disambiguate_for_kakao")
+    print("-" * 50)
+    dis = chatbot.format_disambiguate_for_kakao([{"term": "PER", "full_name": "주가수익비율"}])
+    qr_labels = [q["label"] for q in dis["template"]["quickReplies"]]
+    print(f"  quickReplies: {qr_labels}")
+    assert "다시 입력" not in qr_labels
+    assert "용어 직접 입력" in qr_labels
+    print("  ✅ disambiguate quickReplies 정상")
+    print()
+
+    # 5. category
+    print("[5] format_category_for_kakao")
+    print("-" * 50)
+    cat = chatbot.format_category_for_kakao("지표 · 숫자 용어")
+    qr_labels = [q["label"] for q in cat["template"]["quickReplies"]]
+    print(f"  quickReplies: {qr_labels}")
+    assert "메인으로" in qr_labels
+    assert "다른 카테고리 보기" in qr_labels
+    assert "종료" not in qr_labels
+    print("  ✅ category quickReplies 정상")
     print()
 
     print("=" * 60)
-    print("테스트 완료")
+    print("✅ v6 일원화 테스트 완료")
     print("=" * 60)

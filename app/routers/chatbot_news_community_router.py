@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
+from typing import Optional
 
 from app.services.chatbot_community.chatbot_news_community import ChatbotNewsCommunity
 from app.utils.ticker_normalizer import resolve_symbol_and_name  # ✅ ticker -> (symbol, company_name)
@@ -10,6 +11,7 @@ from app.utils.ticker_normalizer import resolve_symbol_and_name  # ✅ ticker ->
 class BriefingRequest(BaseModel):
     ticker: str = Field(..., min_length=1)
     user_name: str = "사용자"
+    segment: Optional[str] = "default"   # ★ Stage 4 신규
 
 
 router = APIRouter(
@@ -45,11 +47,15 @@ def chatbot_community(req: BriefingRequest):
     if not symbol or not symbol.isdigit() or len(symbol) != 6:
         return _no_stock_kakao(req.ticker)
 
+    segment = (req.segment or "default").strip()   # ★ Stage 4
+
     summary = chatbot.get_community_summary(
         symbol=symbol,
         company_name=company_name,
+        segment=segment,   # ★
     )
     return chatbot.format_community_for_kakao(summary, user_name=req.user_name)
+
 
 @router.post("/news")
 def chatbot_news(req: BriefingRequest):
@@ -61,8 +67,11 @@ def chatbot_news(req: BriefingRequest):
     if not symbol or not symbol.isdigit() or len(symbol) != 6:
         return _no_stock_kakao(req.ticker)
 
+    segment = (req.segment or "default").strip()   # ★ Stage 4
+
     summary = chatbot.get_news_summary(
         symbol=symbol,
         company_name=company_name,
+        segment=segment,   # ★
     )
     return chatbot.format_news_for_kakao(summary)

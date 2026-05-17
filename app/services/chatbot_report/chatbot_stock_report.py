@@ -16,6 +16,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from app.services.segment_personalization import build_system_instruction
+
 
 class ChatbotStockReport:
     """
@@ -162,15 +164,28 @@ class ChatbotStockReport:
                 return cleaned.strip()
         return ""
 
-    def _generate_llm_text(self, prompt: str) -> Optional[str]:
-        """LLM 텍스트 생성 (공통)"""
+    def _generate_llm_text(self, prompt: str, segment: str = "default") -> Optional[str]:
+        """LLM 텍스트 생성 (공통)
+
+        ★ Stage 4: segment 라벨을 system_instruction에 합성
+        """
         if not self.genai:
             return None
+
+        # 원본 base_instruction은 그대로 유지
+        base_instruction = (
+            "당신은 한국 주식시장 전문 애널리스트입니다. "
+            "초보 투자자가 이해할 수 있도록 쉽고 친근하게 설명합니다. "
+            "매수/매도 추천은 하지 않고 정보 제공만 합니다."
+        )
+
+        # ★ Stage 4: segment 라벨 합성
+        final_instruction = build_system_instruction(base_instruction, segment)
 
         try:
             model = self.genai.GenerativeModel(
                 'gemini-2.5-flash',
-                system_instruction="당신은 한국 주식시장 전문 애널리스트입니다. 초보 투자자가 이해할 수 있도록 쉽고 친근하게 설명합니다. 매수/매도 추천은 하지 않고 정보 제공만 합니다."
+                system_instruction=final_instruction
             )
             response = model.generate_content(
                 prompt,
@@ -180,8 +195,8 @@ class ChatbotStockReport:
         except Exception:
             return None
 
-    def _generate_investment_summary_text(self, data: Dict, company_name: str) -> Dict:
-        """투자 요약 텍스트 생성"""
+    def _generate_investment_summary_text(self, data: Dict, company_name: str, segment: str = "default") -> Dict:
+        """투자 요약 텍스트 생성 ★ Stage 4: segment 인자 추가"""
         info = data.get("info", {})
         fundamental = data.get("fundamental", {})
         technical = data.get("technical", {})
@@ -222,7 +237,7 @@ RSI: {rsi_info.get('value', 'N/A')} ({rsi_info.get('signal', {}).get('descriptio
 • [포인트3]
 ✔️ [체크포인트]"""
 
-        result = self._generate_llm_text(prompt)
+        result = self._generate_llm_text(prompt, segment=segment)
 
         if result:
             points = self._parse_bullet_lines(result)
@@ -240,8 +255,8 @@ RSI: {rsi_info.get('value', 'N/A')} ({rsi_info.get('signal', {}).get('descriptio
             "checkpoint": "주요 체크 포인트는 실적 흐름과 시장 환경 변화예요."
         }
 
-    def _generate_financial_text(self, data: Dict, company_name: str) -> Dict:
-        """재무 분석 텍스트 생성"""
+    def _generate_financial_text(self, data: Dict, company_name: str, segment: str = "default") -> Dict:
+        """재무 분석 텍스트 생성 ★ Stage 4: segment 인자 추가"""
         fundamental = data.get("fundamental", {})
         dart = data.get("dart", {})
 
@@ -286,7 +301,7 @@ ROE: {fundamental.get('roe', 'N/A')}%{dart_section}
 • [포인트3]
 ✔️ [체크포인트]"""
 
-        result = self._generate_llm_text(prompt)
+        result = self._generate_llm_text(prompt, segment=segment)
 
         if result:
             points = self._parse_bullet_lines(result)
@@ -303,8 +318,8 @@ ROE: {fundamental.get('roe', 'N/A')}%{dart_section}
             "checkpoint": "재무 안정성 측면의 상세 분석은 웹 리포트를 참고해주세요."
         }
 
-    def _generate_valuation_text(self, data: Dict, company_name: str) -> str:
-        """밸류에이션 해석 텍스트 생성"""
+    def _generate_valuation_text(self, data: Dict, company_name: str, segment: str = "default") -> str:
+        """밸류에이션 해석 텍스트 생성 ★ Stage 4: segment 인자 추가"""
         fundamental = data.get("fundamental", {})
 
         prompt = f"""{company_name}의 밸류에이션 지표입니다.
@@ -317,7 +332,7 @@ PER: {fundamental.get('per', 'N/A')} / PBR: {fundamental.get('pbr', 'N/A')} / RO
 - 인사말이나 서두 없이 바로 해석만 작성
 - 위에 제공된 데이터만 언급하세요. 데이터에 없는 지표는 언급하지 마세요."""
 
-        result = self._generate_llm_text(prompt)
+        result = self._generate_llm_text(prompt, segment=segment)
         if result:
             import re
             cleaned = re.sub(r'\*\*(.*?)\*\*', r'\1', result)
@@ -336,8 +351,8 @@ PER: {fundamental.get('per', 'N/A')} / PBR: {fundamental.get('pbr', 'N/A')} / RO
 
         return "밸류에이션 데이터를 확인 중이에요."
 
-    def _generate_opinion_text(self, data: Dict, company_name: str) -> Dict:
-        """투자 의견 텍스트 생성"""
+    def _generate_opinion_text(self, data: Dict, company_name: str, segment: str = "default") -> Dict:
+        """투자 의견 텍스트 생성 ★ Stage 4: segment 인자 추가"""
         info = data.get("info", {})
         fundamental = data.get("fundamental", {})
         technical = data.get("technical", {})
@@ -365,7 +380,7 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
 • [의견3]
 👉 [리스크 주의사항]"""
 
-        result = self._generate_llm_text(prompt)
+        result = self._generate_llm_text(prompt, segment=segment)
 
         if result:
             points = self._parse_bullet_lines(result)
@@ -386,12 +401,13 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
     # 현재가 단독 조회 (캐시 리포트 갱신용)
     # ========================================
 
-    def get_price_info(self, symbol: str) -> Dict:
+    def get_price_info(self, symbol: str, segment: str = "default") -> Dict:
         """
         현재가·등락 단독 조회
 
         LLM 호출 없이 가격 데이터만 빠르게 반환.
         백엔드에서 캐시된 리포트를 전달할 때 가격 필드만 갱신하는 용도.
+        ★ Stage 4: segment 인자 추가 (LLM 호출 없으므로 segment는 무시됨, 호환용)
 
         Returns:
             {"current_price": int, "price_change": int, "change_rate": float, "source": str}
@@ -408,13 +424,15 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
     # 리포트 요약 (1차 결과)
     # ========================================
 
-    def get_report_summary(self, symbol: str, company_name: str) -> Dict:
+    def get_report_summary(self, symbol: str, company_name: str, segment: str = "default") -> Dict:
         """
         종목 리포트 요약 (1차 결과)
+        ★ Stage 4: segment 인자 추가
 
         Args:
             symbol: 종목코드 (예: "005930")
             company_name: 회사명 (예: "삼성전자")
+            segment: 사용자 세그먼트 라벨 (기본값 "default" → 기존 동작 유지)
 
         Returns:
             {
@@ -450,8 +468,8 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
         else:
             rsi_signal = str(rsi_signal_data)
 
-        # 투자 요약 텍스트 생성
-        summary_content = self._generate_investment_summary_text(data, company_name)
+        # ★ Stage 4: segment 전달
+        summary_content = self._generate_investment_summary_text(data, company_name, segment=segment)
         summary_text = "\n".join([f"• {p}" for p in summary_content.get("points", [])])
         if summary_content.get("checkpoint"):
             summary_text += f"\n\n✔️ {summary_content['checkpoint']}"
@@ -476,6 +494,7 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
             "investment_summary": summary_text,
             "web_url": f"https://jutopia.com/stock/{symbol}/report",
             "generated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "segment": segment,  # ★ Stage 4: 디버깅/캐싱용
             # 내부 캐시용 (주제별 상세에서 재사용)
             "_raw_data": data,
         }
@@ -485,16 +504,19 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
     # ========================================
 
     def get_section_detail(
-        self, symbol: str, company_name: str, section: str, raw_data: Optional[Dict] = None
+        self, symbol: str, company_name: str, section: str,
+        raw_data: Optional[Dict] = None, segment: str = "default"
     ) -> Dict:
         """
         주제별 상세 조회
+        ★ Stage 4: segment 인자 추가
 
         Args:
             symbol: 종목코드
             company_name: 회사명
             section: 섹션 키 (investment_summary, price_trend, financial_analysis, valuation, investment_opinion)
             raw_data: 이전 수집 데이터 (캐시 재활용)
+            segment: 사용자 세그먼트 라벨 (기본값 "default" → 기존 동작 유지)
 
         Returns:
             섹션별 상세 데이터
@@ -505,16 +527,29 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
         # 데이터 수집 (캐시 없으면 새로 수집)
         data = raw_data or self._collect_stock_data(symbol, company_name)
 
-        section_builders = {
-            "investment_summary": self._build_investment_summary,
-            "price_trend": self._build_price_trend,
-            "financial_analysis": self._build_financial_analysis,
-            "valuation": self._build_valuation,
-            "investment_opinion": self._build_investment_opinion,
-        }
-
-        builder = section_builders[section]
-        content = builder(data, company_name)
+        # ★ Stage 4: dispatch table 대신 직접 분기하여 segment 전달
+        if section == "investment_summary":
+            content = self._generate_investment_summary_text(data, company_name, segment=segment)
+        elif section == "price_trend":
+            # price_trend는 LLM 호출 없음 — segment 무시
+            content = self._build_price_trend(data, company_name)
+        elif section == "financial_analysis":
+            content = self._generate_financial_text(data, company_name, segment=segment)
+        elif section == "valuation":
+            fundamental = data.get("fundamental", {})
+            interpretation = self._generate_valuation_text(data, company_name, segment=segment)
+            content = {
+                "metrics": {
+                    "per": fundamental.get("per", 0),
+                    "pbr": fundamental.get("pbr", 0),
+                    "roe": fundamental.get("roe", 0),
+                },
+                "interpretation": interpretation,
+            }
+        elif section == "investment_opinion":
+            content = self._generate_opinion_text(data, company_name, segment=segment)
+        else:
+            return self._error_response(f"잘못된 섹션: {section}")
 
         return {
             "section": section,
@@ -522,6 +557,7 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
             "symbol": symbol,
             "company_name": company_name,
             "content": content,
+            "segment": segment,  # ★ Stage 4: 디버깅/캐싱용
             "generated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         }
 
@@ -589,9 +625,10 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
     # 전체 확인하기
     # ========================================
 
-    def get_all_sections(self, symbol: str, company_name: str) -> Dict:
+    def get_all_sections(self, symbol: str, company_name: str, segment: str = "default") -> Dict:
         """
         전체 확인하기 (1~5번 각 2~3줄 압축)
+        ★ Stage 4: segment 인자 추가
 
         Returns:
             {
@@ -615,8 +652,8 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
         # 각 섹션을 2~3줄로 압축
         sections = {}
 
-        # 투자 요약
-        summary = self._generate_investment_summary_text(data, company_name)
+        # ★ Stage 4: 각 _generate_*_text에 segment 전달
+        summary = self._generate_investment_summary_text(data, company_name, segment=segment)
         points = summary.get("points", [])
         sections["investment_summary"] = ", ".join(points[:2]) if points else "데이터 준비 중"
 
@@ -630,7 +667,7 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
         sections["price_trend"] = f"1개월 {r1m}% / 3개월 {r3m}% / 1년 {r1y}%, RSI {rsi_desc}"
 
         # 재무 분석
-        fin = self._generate_financial_text(data, company_name)
+        fin = self._generate_financial_text(data, company_name, segment=segment)
         fin_points = fin.get("points", [])
         sections["financial_analysis"] = ", ".join(fin_points[:2]) if fin_points else "데이터 준비 중"
 
@@ -638,11 +675,11 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
         per = fundamental.get("per", "N/A")
         pbr = fundamental.get("pbr", "N/A")
         roe = fundamental.get("roe", "N/A")
-        val_text = self._generate_valuation_text(data, company_name)
+        val_text = self._generate_valuation_text(data, company_name, segment=segment)
         sections["valuation"] = f"PER {per} / PBR {pbr} / ROE {roe}%, {val_text[:30]}"
 
         # 투자 의견
-        opinion = self._generate_opinion_text(data, company_name)
+        opinion = self._generate_opinion_text(data, company_name, segment=segment)
         op_points = opinion.get("points", [])
         sections["investment_opinion"] = ", ".join(op_points[:2]) if op_points else "데이터 준비 중"
 
@@ -650,6 +687,7 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
             "symbol": symbol,
             "company_name": company_name,
             "sections": sections,
+            "segment": segment,  # ★ Stage 4: 디버깅/캐싱용
             "generated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         }
 
@@ -1177,3 +1215,4 @@ if __name__ == "__main__":
     print("=" * 60)
     print("✅ 테스트 완료")
     print("=" * 60)
+
