@@ -3,9 +3,6 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-# 프로젝트 구조에 맞게 import 경로를 수정하세요.
-# 예:
-# from app.service.chatbot_favorites import ChatbotFavorites
 from app.services.chatbot_favorites import ChatbotFavorites
 
 
