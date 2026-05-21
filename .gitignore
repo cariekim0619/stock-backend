@@ -1,0 +1,13 @@
+.env
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+venv/
+*.pem
+env
+.venv/
+.cache/
+**/.cache/
+*.json
+!app/services/chatbot_glossary/data/glossary.json

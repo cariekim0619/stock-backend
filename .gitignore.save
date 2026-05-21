@@ -1,0 +1,12 @@
+ø.env
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+venv/
+*.pem
+env
+.venv/
+.cache/
+**/.cache/
+*.json
