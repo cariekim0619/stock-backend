@@ -67,6 +67,7 @@ class HantuStock:
         api_key: str | None = None,
         secret_key: str | None = None,
         account_id: str | None = None,
+        account_suffix: str | None = None,
         *,
         env: str | None = None,
     ):
@@ -78,7 +79,7 @@ class HantuStock:
         self._api_key = api_key or os.getenv("KIS_APP_KEY", "").strip()
         self._secret_key = secret_key or os.getenv("KIS_APP_SECRET", "").strip()
         self._account_id = account_id or os.getenv("KIS_ACCOUNT_ID", "").strip()
-        self._account_suffix = os.getenv("KIS_ACCOUNT_SUFFIX", "01").strip() or "01"
+        self._account_suffix = (account_suffix or os.getenv("KIS_ACCOUNT_SUFFIX", "01")).strip() or "01"
 
         _env = (env or os.getenv("KIS_ENV", "prod")).strip().lower()
         if _env not in {"prod", "vps", "paper", "demo", "sandbox", "vts"}:
@@ -122,8 +123,16 @@ class HantuStock:
         return prefix + codes[key]
 
     def _get_access_token(self) -> str:
-        token_path = "/oauth2/token" if self._env == "prod" else "/oauth2/tokenP"
-        url = self._base_url + token_path
+        """KIS OAuth access token 발급.
+
+        실전/모의 모두 /oauth2/tokenP 를 우선 사용한다.
+        일부 실전 계정에서 /oauth2/token 은 JSON body 를 제대로 인식하지 못해
+        EGW00115(grant_type required)를 반환할 수 있으므로 보조 경로로만 둔다.
+        """
+        token_paths = ["/oauth2/tokenP"]
+        if self._env == "prod":
+            token_paths.append("/oauth2/token")
+
         key = _token_cache_key(self._env, self._base_url, self._api_key)
 
         token = _cached_token(key)
@@ -132,43 +141,55 @@ class HantuStock:
 
         _raise_if_token_cooldown(key)
 
-        headers = {"content-type": "application/json"}
+        headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "Accept": "application/json",
+        }
         body = {
             "grant_type": "client_credentials",
             "appkey": self._api_key,
             "appsecret": self._secret_key,
         }
 
-        try:
-            res = requests.post(url, headers=headers, data=json.dumps(body), timeout=30)
+        last_error = "KIS token issue failed"
+        for token_path in token_paths:
+            url = self._base_url + token_path
             try:
-                data = res.json()
-            except ValueError:
-                preview = (res.text or "")[:300]
-                print(f"[WARN] token non-JSON response: status={res.status_code}, body={preview!r}")
-                _set_token_cooldown(key, 15)
-                raise RuntimeError("KIS token non-JSON response")
+                res = requests.post(url, headers=headers, json=body, timeout=30)
+                try:
+                    data = res.json()
+                except ValueError:
+                    preview = (res.text or "")[:300]
+                    print(f"[WARN] token non-JSON response: path={token_path}, status={res.status_code}, body={preview!r}")
+                    last_error = "KIS token non-JSON response"
+                    continue
 
-            token = data.get("access_token")
-            if token:
-                _set_token_cache(key, token)
-                return token
+                token = data.get("access_token")
+                if token:
+                    _set_token_cache(key, token)
+                    return token
 
-            error_code = data.get("error_code") or data.get("msg_cd") or data.get("code")
-            print(f"[WARN] token error: {data}")
-            if error_code == "EGW00133":
-                _set_token_cooldown(key, _TOKEN_COOLDOWN_SEC)
-                raise RuntimeError(f"KIS token rate limited(EGW00133); retry after {_TOKEN_COOLDOWN_SEC}s")
+                error_code = data.get("error_code") or data.get("msg_cd") or data.get("code")
+                last_error = data.get("error_description") or data.get("msg1") or str(data)
+                print(f"[WARN] token error: path={token_path}, {data}")
 
-            _set_token_cooldown(key, 15)
-            raise RuntimeError(data.get("error_description") or data.get("msg1") or "KIS token issue failed")
+                if error_code == "EGW00133":
+                    _set_token_cooldown(key, _TOKEN_COOLDOWN_SEC)
+                    raise RuntimeError(f"KIS token rate limited(EGW00133); retry after {_TOKEN_COOLDOWN_SEC}s")
 
-        except RuntimeError:
-            raise
-        except Exception as e:
-            print(f"[ERROR] get_access_token: {e}")
-            _set_token_cooldown(key, 15)
-            raise RuntimeError(f"KIS token issue failed: {e}")
+                # /oauth2/token 에서 grant_type missing 이 나는 경우가 있어 다음 경로를 시도한다.
+                if error_code == "EGW00115":
+                    continue
+
+            except RuntimeError:
+                raise
+            except Exception as e:
+                last_error = repr(e)
+                print(f"[ERROR] get_access_token: path={token_path}, error={e}")
+                continue
+
+        _set_token_cooldown(key, 15)
+        raise RuntimeError(last_error)
 
     def _ensure_access_token(self) -> str:
         if self._access_token:

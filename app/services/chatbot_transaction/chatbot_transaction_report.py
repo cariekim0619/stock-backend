@@ -53,8 +53,29 @@ class ChatbotTransactionReport:
     def _get_hantu(self):
         if self.hantu is not None:
             return self.hantu
+
         from app.services.chatbot_report.HantuStock import HantuStock
-        self.hantu = HantuStock()
+
+        # 거래내역은 추천종목/시세용 KIS_ENV와 분리한다.
+        # 기본 .env는 vps로 유지해 추천종목을 안정화하고,
+        # 거래내역만 KIS_TRANSACTION_* 실전 계정으로 조회할 수 있게 한다.
+        tx_env = (os.environ.get("KIS_TRANSACTION_ENV") or "").strip()
+        tx_key = (os.environ.get("KIS_TRANSACTION_APP_KEY") or "").strip()
+        tx_secret = (os.environ.get("KIS_TRANSACTION_APP_SECRET") or "").strip()
+        tx_account = (os.environ.get("KIS_TRANSACTION_ACCOUNT_ID") or "").strip()
+        tx_suffix = (os.environ.get("KIS_TRANSACTION_ACCOUNT_SUFFIX") or "01").strip() or "01"
+
+        if tx_key and tx_secret and tx_account:
+            self.hantu = HantuStock(
+                api_key=tx_key,
+                secret_key=tx_secret,
+                account_id=tx_account,
+                account_suffix=tx_suffix,
+                env=tx_env or "prod",
+            )
+        else:
+            self.hantu = HantuStock()
+
         return self.hantu
 
     # ========================================
@@ -94,11 +115,15 @@ class ChatbotTransactionReport:
         """
         segment = normalize_segment(segment)
         # 1단계: 거래내역 조회
-        transactions = self._get_hantu().get_transaction_history(period=period)
+        try:
+            transactions = self._get_hantu().get_transaction_history(period=period)
+        except Exception as e:
+            print(f"[ERROR] get_transaction_report: transaction history failed: {e}")
+            return self._error_response(str(e), segment=segment, period=period, symbol=symbol, company_name=company_name)
 
         # 2단계: 해당 종목 필터링
         stock_transactions = [
-            t for t in transactions if t["pdno"] == symbol
+            t for t in (transactions or []) if str(t.get("pdno", "")).strip() == str(symbol).strip()
         ]
 
         # 거래내역 없음
@@ -153,8 +178,11 @@ class ChatbotTransactionReport:
         sell_amount = 0
 
         for t in transactions:
-            is_buy = t["sll_buy_dvsn_cd"] == "02"
-            amt = t["tot_ccld_amt"]
+            is_buy = str(t.get("sll_buy_dvsn_cd", "")) == "02"
+            try:
+                amt = float(t.get("tot_ccld_amt") or 0)
+            except Exception:
+                amt = 0
 
             if is_buy:
                 buy_trades += 1
@@ -250,10 +278,13 @@ class ChatbotTransactionReport:
         # 개별 거래 내역
         lines.append("거래 상세:")
         for t in transactions:
-            side = "매수" if t["sll_buy_dvsn_cd"] == "02" else "매도"
-            date = t["ord_dt"]
-            formatted_date = f"{date[:4]}-{date[4:6]}-{date[6:]}"
-            lines.append(f"  {formatted_date} {side} {t['tot_ccld_qty']}주 @ {t['avg_prvs']:,.0f}원 (총 {t['tot_ccld_amt']:,.0f}원)")
+            side = "매수" if str(t.get("sll_buy_dvsn_cd", "")) == "02" else "매도"
+            date = str(t.get("ord_dt") or "")
+            formatted_date = f"{date[:4]}-{date[4:6]}-{date[6:]}" if len(date) >= 8 else date
+            qty = t.get("tot_ccld_qty") or 0
+            price = float(t.get("avg_prvs") or 0)
+            amount = float(t.get("tot_ccld_amt") or 0)
+            lines.append(f"  {formatted_date} {side} {qty}주 @ {price:,.0f}원 (총 {amount:,.0f}원)")
 
         return "\n".join(lines)
 
@@ -384,10 +415,14 @@ class ChatbotTransactionReport:
         - 말풍선 3: 웹 상세 리포트 버튼 (basicCard)
         - 퀵 버튼: 다른 종목 보기 / 종료
         """
+        if report.get("error"):
+            return self._kakao_error_response(report.get("error") or "거래내역 조회 중 오류가 발생했어요.")
+
         if report.get("no_transaction"):
             return self.format_no_transaction_kakao(
                 report.get("symbol", ""),
-                report.get("company_name", "종목")
+                report.get("company_name", "종목"),
+                report.get("period", "1m"),
             )
 
         company = report.get("company_name", "종목")
@@ -487,16 +522,17 @@ class ChatbotTransactionReport:
             },
         }
 
-    def format_no_transaction_kakao(self, symbol: str, company_name: str) -> Dict:
+    def format_no_transaction_kakao(self, symbol: str, company_name: str, period: str = "1m") -> Dict:
         """
         거래내역 없음 시 카카오톡 응답
         """
+        period_label = {"1w": "최근 1주일", "1m": "최근 1개월", "3m": "최근 3개월", "1y": "최근 1년"}.get(period, "선택한 기간")
         return {
             "version": "2.0",
             "template": {
                 "outputs": [{
                     "simpleText": {
-                        "text": f"⚠️ 최근 30일 동안\n{company_name}의 거래내역이 없어요.\n\n다른 종목을 입력해주세요."
+                        "text": f"⚠️ {period_label} 동안\n{company_name}의 거래내역이 없어요.\n\n기간을 더 길게 선택하거나 다른 종목을 입력해주세요."
                     }
                 }],
                 "quickReplies": [
@@ -510,10 +546,12 @@ class ChatbotTransactionReport:
             },
         }
 
-    def _error_response(self, reason: str) -> Dict:
+    def _error_response(self, reason: str, *, segment: str = "risk-neutral", period: str = "1m", symbol: str = "", company_name: str = "") -> Dict:
         """에러 응답"""
         return {
             "error": reason,
+            "symbol": symbol,
+            "company_name": company_name or symbol or "종목",
             "generated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             "segment": segment,
             "period": period,

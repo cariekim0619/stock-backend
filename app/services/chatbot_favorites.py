@@ -789,6 +789,19 @@ class ChatbotFavorites:
 
         return {
             "version": "2.0",
+            "data": {
+                "category": category,
+                "stocks": [
+                    {
+                        "ticker": s.get("symbol", ""),
+                        "name": s.get("company_name", ""),
+                        "current_price": s.get("current_price", 0),
+                        "change_rate": s.get("change_rate", 0),
+                        "volume": s.get("volume", 0),
+                    }
+                    for s in stocks[:5]
+                ],
+            },
             "template": {
                 "outputs": [{"simpleText": {"text": text}}],
                 "quickReplies": [
