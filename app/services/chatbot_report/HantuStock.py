@@ -12,6 +12,10 @@ try:
 except Exception:
     fdr = None
 
+# pykrx는 추천 종목 기능에서 사용하지 않는다.
+# import 시 KRX 로그인 경로가 실행되는 환경이 있어 top-level import를 금지한다.
+pystock = None
+
 from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 
@@ -20,8 +24,41 @@ load_dotenv()
 
 # 실전 API (데이터 조회 전용) 토큰 캐시 — 프로세스 내 공유
 _PROD_BASE_URL = "https://openapi.koreainvestment.com:9443"
-_prod_token: str | None = None
-_prod_token_time: float = 0.0
+
+# KIS OAuth token issue API is rate-limited.
+# Cache tokens per process and apply a cooldown after EGW00133 so repeated
+# chatbot requests do not keep calling /oauth2/token(P).
+_TOKEN_TTL_SEC = int(os.getenv("KIS_TOKEN_TTL_SEC", "82800"))  # 23h safety margin
+_TOKEN_COOLDOWN_SEC = int(os.getenv("KIS_TOKEN_COOLDOWN_SEC", "65"))
+_token_cache: dict[tuple[str, str, str], tuple[str, float]] = {}
+_token_cooldown_until: dict[tuple[str, str, str], float] = {}
+
+def _token_cache_key(env: str, base_url: str, appkey: str) -> tuple[str, str, str]:
+    return ((env or "").strip().lower(), (base_url or "").strip(), (appkey or "").strip()[-10:])
+
+def _cached_token(key: tuple[str, str, str]) -> str:
+    cached = _token_cache.get(key)
+    if not cached:
+        return ""
+    token, issued_at = cached
+    if token and (time.time() - issued_at) < _TOKEN_TTL_SEC:
+        return token
+    _token_cache.pop(key, None)
+    return ""
+
+def _set_token_cache(key: tuple[str, str, str], token: str) -> None:
+    if token:
+        _token_cache[key] = (token, time.time())
+
+def _set_token_cooldown(key: tuple[str, str, str], seconds: int | None = None) -> None:
+    _token_cooldown_until[key] = time.time() + int(seconds or _TOKEN_COOLDOWN_SEC)
+
+def _raise_if_token_cooldown(key: tuple[str, str, str]) -> None:
+    until = _token_cooldown_until.get(key) or 0
+    remain = int(until - time.time())
+    if remain > 0:
+        raise RuntimeError(f"KIS token cooldown active; retry after {remain}s")
+    _token_cooldown_until.pop(key, None)
 
 
 class HantuStock:
@@ -66,7 +103,10 @@ class HantuStock:
             if self._env == "prod"
             else "https://openapivts.koreainvestment.com:29443"
         )
-        self._access_token = self._get_access_token()
+        # Do not issue token at construction time.
+        # Ranking/recommendation can create multiple HantuStock instances in a short time;
+        # token issuance happens lazily in _header() and is cached process-wide.
+        self._access_token = None
 
     # -------------------- 내부 공통 --------------------
     def _tr(self, key: str) -> str:
@@ -84,33 +124,65 @@ class HantuStock:
     def _get_access_token(self) -> str:
         token_path = "/oauth2/token" if self._env == "prod" else "/oauth2/tokenP"
         url = self._base_url + token_path
+        key = _token_cache_key(self._env, self._base_url, self._api_key)
+
+        token = _cached_token(key)
+        if token:
+            return token
+
+        _raise_if_token_cooldown(key)
+
         headers = {"content-type": "application/json"}
         body = {
             "grant_type": "client_credentials",
             "appkey": self._api_key,
             "appsecret": self._secret_key,
         }
-        backoff = 0.5
-        for attempt in range(6):
+
+        try:
+            res = requests.post(url, headers=headers, data=json.dumps(body), timeout=30)
             try:
-                res = requests.post(url, headers=headers, data=json.dumps(body), timeout=30)
                 data = res.json()
-                if "access_token" in data:
-                    return data["access_token"]
-                # error message
-                print(f"[WARN] token error: {data}")
-            except Exception as e:
-                print(f"[ERROR] get_access_token: {e}")
-            time.sleep(backoff)
-            backoff = min(backoff * 2, 5.0)
-        raise RuntimeError("Failed to get access token after retries")
+            except ValueError:
+                preview = (res.text or "")[:300]
+                print(f"[WARN] token non-JSON response: status={res.status_code}, body={preview!r}")
+                _set_token_cooldown(key, 15)
+                raise RuntimeError("KIS token non-JSON response")
+
+            token = data.get("access_token")
+            if token:
+                _set_token_cache(key, token)
+                return token
+
+            error_code = data.get("error_code") or data.get("msg_cd") or data.get("code")
+            print(f"[WARN] token error: {data}")
+            if error_code == "EGW00133":
+                _set_token_cooldown(key, _TOKEN_COOLDOWN_SEC)
+                raise RuntimeError(f"KIS token rate limited(EGW00133); retry after {_TOKEN_COOLDOWN_SEC}s")
+
+            _set_token_cooldown(key, 15)
+            raise RuntimeError(data.get("error_description") or data.get("msg1") or "KIS token issue failed")
+
+        except RuntimeError:
+            raise
+        except Exception as e:
+            print(f"[ERROR] get_access_token: {e}")
+            _set_token_cooldown(key, 15)
+            raise RuntimeError(f"KIS token issue failed: {e}")
+
+    def _ensure_access_token(self) -> str:
+        if self._access_token:
+            return self._access_token
+        self._access_token = self._get_access_token()
+        return self._access_token
 
     def _header(self, tr_id: str) -> dict:
+        token = self._ensure_access_token()
         return {
             "content-type": "application/json",
             "appkey": self._api_key,
             "appsecret": self._secret_key,
-            "authorization": f"Bearer {self._access_token}",
+            "authorization": f"Bearer {token}",
             "tr_id": tr_id,
         }
 
@@ -305,7 +377,31 @@ class HantuStock:
 
     @staticmethod
     def get_past_data_total(days: int = 10):
-        raise RuntimeError("get_past_data_total is disabled in KIS-only backend. Use KIS quotation/ranking APIs instead.")
+        try:
+            from pykrx import stock as _pystock
+        except Exception as e:
+            raise ImportError(f"pykrx unavailable: {e}")
+        total = None
+        got = 0
+        passed = 0
+        today = datetime.now()
+        while (got < days) and passed < max(10, days * 2):
+            d = str(today - relativedelta(days=passed)).split(" ")[0]
+            k1 = _pystock.get_market_ohlcv(d, market="KOSPI")
+            k2 = _pystock.get_market_ohlcv(d, market="KOSDAQ")
+            data = pd.concat([k1, k2])
+            passed += 1
+            if data["거래대금"].sum() == 0:
+                continue
+            got += 1
+            data.columns = ["open", "high", "low", "close", "volume", "trade_amount", "diff"]
+            data.index.name = "ticker"
+            data["timestamp"] = d
+            total = data.copy() if total is None else pd.concat([total, data])
+        total = total.sort_values("timestamp").reset_index()
+        for col in ["open", "high", "low"]:
+            total[col] = total[col].where(total[col] > 0, other=total["close"])
+        return total
 
     # -------------------- 계좌 --------------------
     def _inquire_balance_raw(self, *, account_info=False):
@@ -849,27 +945,51 @@ class HantuStock:
         return result
 
     def _get_prod_token(self, prod_key: str, prod_secret: str) -> str:
-        """실전 API 토큰 조회 (24시간 캐시, 프로세스 내 공유)"""
-        global _prod_token, _prod_token_time
-        if _prod_token and (time.time() - _prod_token_time) < 86400:
-            return _prod_token
+        """실전 API 토큰 조회. Process-wide cache + EGW00133 cooldown."""
+        key = _token_cache_key("prod-ranking", _PROD_BASE_URL, prod_key)
+        token = _cached_token(key)
+        if token:
+            return token
+
+        _raise_if_token_cooldown(key)
+
         url = _PROD_BASE_URL + "/oauth2/token"
         body = {
             "grant_type": "client_credentials",
             "appkey": prod_key,
             "appsecret": prod_secret,
         }
-        res = requests.post(
-            url,
-            headers={"content-type": "application/json"},
-            data=json.dumps(body),
-            timeout=30,
-        )
-        token = res.json().get("access_token", "")
-        if token:
-            _prod_token = token
-            _prod_token_time = time.time()
-        return token
+        try:
+            res = requests.post(
+                url,
+                headers={"content-type": "application/json"},
+                data=json.dumps(body),
+                timeout=30,
+            )
+            try:
+                data = res.json()
+            except ValueError:
+                preview = (res.text or "")[:300]
+                print(f"[WARN] prod token non-JSON response: status={res.status_code}, body={preview!r}")
+                _set_token_cooldown(key, 15)
+                return ""
+
+            token = data.get("access_token", "")
+            if token:
+                _set_token_cache(key, token)
+                return token
+
+            error_code = data.get("error_code") or data.get("msg_cd") or data.get("code")
+            print(f"[WARN] prod token error: {data}")
+            if error_code == "EGW00133":
+                _set_token_cooldown(key, _TOKEN_COOLDOWN_SEC)
+            else:
+                _set_token_cooldown(key, 15)
+            return ""
+        except Exception as e:
+            print(f"[WARN] prod token request failed: {e}")
+            _set_token_cooldown(key, 15)
+            return ""
 
     def get_market_ranking(
         self,
@@ -915,6 +1035,9 @@ class HantuStock:
         if self._env == "vps" and prod_key and prod_secret:
             base_url = _PROD_BASE_URL
             token = self._get_prod_token(prod_key, prod_secret)
+            if not token:
+                print("[WARN] get_market_ranking: prod token unavailable")
+                return []
             headers = {
                 "content-type": "application/json",
                 "appkey": prod_key,
