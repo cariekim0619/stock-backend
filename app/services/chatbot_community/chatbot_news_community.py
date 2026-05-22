@@ -105,9 +105,8 @@ class ChatbotNewsCommunity:
 
         # 요약 텍스트 생성
         summary_text = self._generate_sentiment_summary(sentiment_tone, items)
-        lens = get_personalization_note(segment, domain="community")
-        if lens and lens not in summary_text:
-            summary_text = f"{summary_text} {lens}"
+        # v5: 성향 라벨/고정 문구를 사용자 응답에 직접 덧붙이지 않는다.
+        # 개인화는 LLM prompt_suffix에서 강조점과 해석 톤으로 반영한다.
 
         # 실시간성 표현
         timestamp = self._get_realtime_expression()

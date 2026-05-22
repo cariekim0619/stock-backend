@@ -313,9 +313,8 @@ class ChatbotTransactionReport:
             pattern = "거래 패턴을 분석 중이에요."
 
         checkpoint = "거래 횟수가 많을수록 단기 가격 변동의 영향을 더 받을 수 있어요."
-        lens = get_personalization_note(segment, domain="transaction")
-        if lens and lens not in checkpoint:
-            checkpoint = f"{checkpoint} {lens}"
+        # v5: 성향 라벨/고정 문구는 사용자 응답에 직접 덧붙이지 않는다.
+        # 거래내역 개인화는 LLM prompt_suffix에서 분석 톤으로 반영한다.
 
         return {
             "flow": flow,
