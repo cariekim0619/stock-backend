@@ -11,3 +11,4 @@ env
 **/.cache/
 *.json
 !app/services/chatbot_glossary/data/glossary.json
+stock-backend/

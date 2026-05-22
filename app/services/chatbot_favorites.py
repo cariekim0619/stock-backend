@@ -388,59 +388,66 @@ class ChatbotFavorites:
     def get_top_stocks(self, category: str = "volume") -> List[Dict]:
         """
         추천 종목 조회
-
-        Args:
-            category:
-                - "volume": 거래량 TOP5
-                - "return": 상승률 TOP5
+        - 1순위: KIS ranking API (HantuStock-4 + StockListDataProvider)
+        - 2순위: 기존 pykrx fallback
         """
+        cat = "volume" if category == "volume" else "return" if category == "return" else ""
+        if not cat:
+            print(f"[WARN] get_top_stocks: 잘못된 category={category}")
+            return []
+
+        # 1) KIS 랭킹 API 우선 사용
+        try:
+            from app.services.stock_list_data import StockListDataProvider
+            provider = StockListDataProvider(getattr(self, "_hantu", None))
+            sort_by = "volume" if cat == "volume" else "change_rate"
+            result = provider.get_sorted_market_stocks(sort_by=sort_by, order="desc", limit=5)
+            if isinstance(result, dict) and "error" not in result:
+                out = []
+                for item in result.get("stocks", [])[:5]:
+                    out.append({
+                        "symbol": item.get("ticker", ""),
+                        "company_name": item.get("name", ""),
+                        "current_price": int(float(item.get("current_price") or 0)),
+                        "change_rate": round(float(item.get("change_rate") or 0), 2),
+                        "volume": int(float(item.get("volume") or 0)),
+                    })
+                if out:
+                    return out
+            else:
+                print(f"[WARN] KIS ranking unavailable: {result.get('error') if isinstance(result, dict) else result}")
+        except Exception as e:
+            print(f"[WARN] KIS ranking fallback to pykrx: {e}")
+
+        # 2) pykrx fallback
         try:
             from pykrx import stock as pystock
-
-            # NOTE:
-            # 기존 구현은 get_market_ohlcv_by_ticker() 기반이었는데
-            # 현재는 해당 경로가 깨진 상태로 보고 우회합니다.
-            # 또한 get_market_price_change()도 같은 날짜 조회는 불안정하여
-            # 이전 날짜 ~ 기준 날짜 구간 조회만 사용합니다.
             df, target_date = self._get_recent_market_price_change_dataframe()
-
             if df is None or df.empty:
                 print("[WARN] get_top_stocks: 최근 영업일 가격변동 데이터를 찾지 못했습니다.")
                 return []
-
-            if category == "volume":
-                # 거래량 기준 상위 5개
+            if cat == "volume":
                 top_df = df.nlargest(5, "거래량")
-
-            elif category == "return":
-                # 상승 종목만 남기고 등락률 기준 상위 5개
+            else:
                 df = df[df["등락률"] > 0]
                 if df.empty:
                     print(f"[WARN] get_top_stocks: 상승률 기준 데이터 없음 ({target_date})")
                     return []
-
                 top_df = df.nlargest(5, "등락률")
-
-            else:
-                print(f"[WARN] get_top_stocks: 잘못된 category={category}")
-                return []
-
             result = []
             for ticker, row in top_df.iterrows():
                 try:
                     name = pystock.get_ticker_name(ticker)
                 except Exception:
                     name = ticker
-
                 result.append({
                     "symbol": ticker,
                     "company_name": name,
                     "current_price": int(row["현재가"]),
                     "change_rate": round(float(row["등락률"]), 2),
+                    "volume": int(row.get("거래량", 0) or 0),
                 })
-
             return result
-
         except Exception as e:
             print(f"[WARN] get_top_stocks 실패: {e}")
             return []

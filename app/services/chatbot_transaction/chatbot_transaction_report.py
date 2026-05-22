@@ -11,9 +11,10 @@ Chatbot_04 거래내역 / 요약 리포트 API
 """
 
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from datetime import datetime
 from dotenv import load_dotenv
+from app.services.segment_personalization import build_prompt_suffix, normalize_segment, get_personalization_note
 
 load_dotenv()
 
@@ -35,8 +36,7 @@ class ChatbotTransactionReport:
 
     def __init__(self):
         """Initialize"""
-        from app.services.chatbot_report.HantuStock import HantuStock
-        self.hantu = HantuStock()
+        self.hantu = None
 
         # Gemini (LLM) - RAG 해설용
         self.gemini_key = os.environ.get("GEMINI_API_KEY")
@@ -50,11 +50,18 @@ class ChatbotTransactionReport:
         else:
             self.genai = None
 
+    def _get_hantu(self):
+        if self.hantu is not None:
+            return self.hantu
+        from app.services.chatbot_report.HantuStock import HantuStock
+        self.hantu = HantuStock()
+        return self.hantu
+
     # ========================================
     # 메인 API: 거래내역 리포트
     # ========================================
 
-    def get_transaction_report(self, symbol: str, company_name: str) -> Dict:
+    def get_transaction_report(self, symbol: str, company_name: str, period: str = "1m", segment: str = "risk-neutral", profile: Optional[Dict[str, Any]] = None) -> Dict:
         """
         거래내역 + 요약 리포트 (챗봇 말풍선 1+2 데이터)
 
@@ -85,8 +92,9 @@ class ChatbotTransactionReport:
                 "generated_at": "..."
             }
         """
-        # 1단계: 거래내역 조회 (최근 1개월)
-        transactions = self.hantu.get_transaction_history(period="1m")
+        segment = normalize_segment(segment)
+        # 1단계: 거래내역 조회
+        transactions = self._get_hantu().get_transaction_history(period=period)
 
         # 2단계: 해당 종목 필터링
         stock_transactions = [
@@ -100,6 +108,8 @@ class ChatbotTransactionReport:
                 "company_name": company_name,
                 "no_transaction": True,
                 "generated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                "segment": segment,
+                "period": period,
             }
 
         # 3단계: 실제 거래 기간 계산
@@ -115,7 +125,7 @@ class ChatbotTransactionReport:
 
         # 5단계: RAG 분석 (거래 패턴 해설)
         rag_analysis = self._generate_rag_analysis(
-            stock_transactions, summary, company_name, actual_days
+            stock_transactions, summary, company_name, actual_days, segment=segment, profile=profile
         )
 
         return {
@@ -127,6 +137,8 @@ class ChatbotTransactionReport:
             "rag_analysis": rag_analysis,
             "web_url": f"https://securities.koreainvestment.com/app/mtsrenewal.jsp?type=06&SSO_SCREENNO=0800",
             "generated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "segment": segment,
+            "period": period,
         }
 
     # ========================================
@@ -171,7 +183,9 @@ class ChatbotTransactionReport:
         transactions: List[Dict],
         summary: Dict,
         company_name: str,
-        period_days: int
+        period_days: int,
+        segment: str = "risk-neutral",
+        profile: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         """
         RAG 기반 거래 패턴 분석
@@ -185,7 +199,7 @@ class ChatbotTransactionReport:
         trade_info = self._build_trade_info_text(transactions, summary, period_days)
 
         if not self.genai:
-            return self._fallback_analysis(summary)
+            return self._fallback_analysis(summary, segment=segment)
 
         prompt = f"""다음은 '{company_name}' 종목의 최근 {period_days}일간 거래내역 요약입니다.
 
@@ -206,7 +220,7 @@ class ChatbotTransactionReport:
 형식:
 ➊ [거래 흐름 내용]
 ➋ [매매 패턴 내용]
-➌ [체크 포인트 내용]"""
+➌ [체크 포인트 내용]""" + build_prompt_suffix(segment, domain="transaction", profile=profile)
 
         try:
             model = self.genai.GenerativeModel(
@@ -219,7 +233,7 @@ class ChatbotTransactionReport:
             )
             return self._parse_rag_response(response.text.strip())
         except Exception:
-            return self._fallback_analysis(summary)
+            return self._fallback_analysis(summary, segment=segment)
 
     def _build_trade_info_text(
         self, transactions: List[Dict], summary: Dict, period_days: int
@@ -286,7 +300,7 @@ class ChatbotTransactionReport:
 
         return result
 
-    def _fallback_analysis(self, summary: Optional[Dict]) -> Dict:
+    def _fallback_analysis(self, summary: Optional[Dict], segment: str = "risk-neutral") -> Dict:
         """LLM 실패 시 기본 분석"""
         if summary and summary.get("buy_trades", 0) > summary.get("sell_trades", 0):
             flow = "최근 거래는 매수 중심으로 이루어지고 있어요."
@@ -298,10 +312,15 @@ class ChatbotTransactionReport:
             flow = "최근 거래는 특정 구간에 집중되어 있어요."
             pattern = "거래 패턴을 분석 중이에요."
 
+        checkpoint = "거래 횟수가 많을수록 단기 가격 변동의 영향을 더 받을 수 있어요."
+        lens = get_personalization_note(segment, domain="transaction")
+        if lens and lens not in checkpoint:
+            checkpoint = f"{checkpoint} {lens}"
+
         return {
             "flow": flow,
             "pattern": pattern,
-            "checkpoint": "거래 횟수가 많을수록 단기 가격 변동의 영향을 더 받을 수 있어요.",
+            "checkpoint": checkpoint,
         }
 
     # ========================================
@@ -497,6 +516,8 @@ class ChatbotTransactionReport:
         return {
             "error": reason,
             "generated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "segment": segment,
+            "period": period,
         }
 
     def _kakao_error_response(self, reason: str) -> Dict:

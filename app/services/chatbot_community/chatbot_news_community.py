@@ -105,6 +105,9 @@ class ChatbotNewsCommunity:
 
         # 요약 텍스트 생성
         summary_text = self._generate_sentiment_summary(sentiment_tone, items)
+        lens = get_personalization_note(segment, domain="community")
+        if lens and lens not in summary_text:
+            summary_text = f"{summary_text} {lens}"
 
         # 실시간성 표현
         timestamp = self._get_realtime_expression()
@@ -318,6 +321,13 @@ class ChatbotNewsCommunity:
 
         # 핵심 이슈로 변환 (3-5개)
         key_issues = self._convert_to_key_issues(filtered_news[:5], company_name, segment=segment, profile=profile)
+        lens = get_personalization_note(segment, domain="news")
+        if lens and key_issues:
+            # 첫 이슈 제목 뒤에 자연스러운 해석 렌즈를 짧게 녹임
+            first = key_issues[0]
+            title = first.get("title", "")
+            if title and lens not in title:
+                first["title"] = f"{title} ({lens})"
 
         return {
             "symbol": symbol,
@@ -457,7 +467,6 @@ class ChatbotNewsCommunity:
         sentiment_emoji = summary.get("sentiment_emoji", "😐")
         summary_text = summary.get("summary_text", "")
         segment = normalize_segment(summary.get("segment"))
-        note = get_personalization_note(segment, domain="community")
         opinions = summary.get("key_opinions", [])
         timestamp = summary.get("timestamp", "최근")
 
@@ -465,9 +474,7 @@ class ChatbotNewsCommunity:
         message_1 = f"""{timestamp} {company_name}에 대한
 커뮤니티 분위기부터 알려드릴게요 {sentiment_emoji}
 
-{summary_text}
-
-{note}"""
+{summary_text}"""
 
         # 2차 메시지: 대표 의견
         opinions_text = "\n".join([f"- \"{op}\"" for op in opinions])
@@ -535,7 +542,6 @@ class ChatbotNewsCommunity:
         key_issues = summary.get("key_issues", [])
         timestamp = summary.get("timestamp", "최근")
         segment = normalize_segment(summary.get("segment"))
-        note = get_personalization_note(segment, domain="news")
 
         # 핵심 이슈 텍스트
         issues_text = "\n".join([f"• {issue['title']}" for issue in key_issues])
@@ -543,9 +549,7 @@ class ChatbotNewsCommunity:
         message = f"""{timestamp} {company_name} 관련
 주요 뉴스도 정리해봤어요.
 
-{issues_text}
-
-{note}"""
+{issues_text}"""
 
         # 첫 번째 뉴스 URL (기사 원문 보기용)
         first_news_url = key_issues[0].get("url", "") if key_issues else ""

@@ -181,6 +181,31 @@ class GlossaryAPI:
         """용어 수"""
         return len(self._data)
 
+    def get_category_preset(self, category: str) -> List[Dict]:
+        """
+        기획서 4개 카테고리별 대표 용어 6개 반환 (Chatbot_03 카테고리 버튼용)
+
+        Args:
+            category: "지표숫자" | "매수매도" | "손익수익률" | "차트기술"
+
+        Returns:
+            [{"term": "PER", "full_name": "주가수익비율"}, ...]
+            카테고리가 없으면 []
+        """
+        presets = {
+            "지표숫자": ["PER", "PBR", "ROE", "EPS", "배당수익률", "시가총액"],
+            "매수매도": ["매수", "매도", "호가", "지정가", "분할매수", "물타기"],
+            "손익수익률": ["실현손익", "평가손익", "수익률", "손절", "익절", "평단가"],
+            "차트기술": ["캔들차트", "이동평균선", "거래량", "RSI", "볼린저밴드", "지지선"],
+        }
+        terms = presets.get(category, [])
+        result = []
+        for t in terms:
+            entry = self.lookup(t)
+            if entry:
+                result.append({"term": entry["term"], "full_name": entry.get("full_name", "")})
+        return result
+
 
 # ========================================
 # 테스트
