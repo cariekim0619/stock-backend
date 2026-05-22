@@ -50,7 +50,7 @@ class ChatbotFavorites:
     기능:
     - get_favorites() / add_favorite() / remove_favorite_by_name(): 관심 종목 CRUD
     - search_stock(): 종목명 검색 (FDR 기반)
-    - get_top_stocks(): 추천 종목 (거래량/상승률 TOP5, pykrx get_market_price_change 기반)
+    - get_top_stocks(): 추천 종목 (거래량/상승률 TOP5, KIS ranking API only)
     - load_holdings_to_favorites(): 보유 종목 일괄 불러오기
     - get_summary_card_data(): 요약 정보 (리포트 + 뉴스 + 거래내역)
     - format_*_for_kakao(): 카카오톡 API 2.0 형식 변환
@@ -250,7 +250,7 @@ class ChatbotFavorites:
         }
 
     # ========================================
-    # 추천 종목 (pykrx get_market_price_change 기반)
+    # 추천 종목 (KIS ranking API only)
     # ========================================
 
     def _find_recent_date_pairs(self, lookback_days: int = 14) -> List[Tuple[str, str]]:
@@ -388,23 +388,33 @@ class ChatbotFavorites:
     def get_top_stocks(self, category: str = "volume") -> List[Dict]:
         """
         추천 종목 조회
-        - 1순위: KIS ranking API (HantuStock-4 + StockListDataProvider)
-        - 2순위: 기존 pykrx fallback
+        - KIS ranking API만 사용한다.
+        - pykrx/KRX 로그인 fallback은 사용하지 않는다.
+        - 장외 시간, 권한, 키 설정, KIS non-JSON 응답 등으로 실패하면 빈 리스트를 반환하고
+          router에서 사용자 안내 메시지를 내려준다.
         """
         cat = "volume" if category == "volume" else "return" if category == "return" else ""
         if not cat:
             print(f"[WARN] get_top_stocks: 잘못된 category={category}")
             return []
 
-        # 1) KIS 랭킹 API 우선 사용
         try:
             from app.services.stock_list_data import StockListDataProvider
             provider = StockListDataProvider(getattr(self, "_hantu", None))
             sort_by = "volume" if cat == "volume" else "change_rate"
             result = provider.get_sorted_market_stocks(sort_by=sort_by, order="desc", limit=5)
-            if isinstance(result, dict) and "error" not in result:
-                out = []
-                for item in result.get("stocks", [])[:5]:
+
+            if not isinstance(result, dict):
+                print(f"[WARN] KIS ranking invalid response: {type(result).__name__}")
+                return []
+
+            if "error" in result:
+                print(f"[WARN] KIS ranking unavailable: {result.get('error')}")
+                return []
+
+            out: List[Dict] = []
+            for item in result.get("stocks", [])[:5]:
+                try:
                     out.append({
                         "symbol": item.get("ticker", ""),
                         "company_name": item.get("name", ""),
@@ -412,44 +422,15 @@ class ChatbotFavorites:
                         "change_rate": round(float(item.get("change_rate") or 0), 2),
                         "volume": int(float(item.get("volume") or 0)),
                     })
-                if out:
-                    return out
-            else:
-                print(f"[WARN] KIS ranking unavailable: {result.get('error') if isinstance(result, dict) else result}")
-        except Exception as e:
-            print(f"[WARN] KIS ranking fallback to pykrx: {e}")
+                except Exception as row_e:
+                    print(f"[WARN] KIS ranking row parse failed: {row_e}; item={item}")
 
-        # 2) pykrx fallback
-        try:
-            from pykrx import stock as pystock
-            df, target_date = self._get_recent_market_price_change_dataframe()
-            if df is None or df.empty:
-                print("[WARN] get_top_stocks: 최근 영업일 가격변동 데이터를 찾지 못했습니다.")
-                return []
-            if cat == "volume":
-                top_df = df.nlargest(5, "거래량")
-            else:
-                df = df[df["등락률"] > 0]
-                if df.empty:
-                    print(f"[WARN] get_top_stocks: 상승률 기준 데이터 없음 ({target_date})")
-                    return []
-                top_df = df.nlargest(5, "등락률")
-            result = []
-            for ticker, row in top_df.iterrows():
-                try:
-                    name = pystock.get_ticker_name(ticker)
-                except Exception:
-                    name = ticker
-                result.append({
-                    "symbol": ticker,
-                    "company_name": name,
-                    "current_price": int(row["현재가"]),
-                    "change_rate": round(float(row["등락률"]), 2),
-                    "volume": int(row.get("거래량", 0) or 0),
-                })
-            return result
+            if not out:
+                print("[WARN] KIS ranking returned empty stocks")
+            return out
+
         except Exception as e:
-            print(f"[WARN] get_top_stocks 실패: {e}")
+            print(f"[WARN] get_top_stocks KIS ranking failed: {e}")
             return []
 
     # ========================================

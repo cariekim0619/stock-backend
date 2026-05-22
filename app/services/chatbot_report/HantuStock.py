@@ -12,10 +12,9 @@ try:
 except Exception:
     fdr = None
 
-try:
-    from pykrx import stock as pystock
-except Exception:
-    pystock = None
+# pykrx는 추천 종목 기능에서 사용하지 않는다.
+# import 시 KRX 로그인 경로가 실행되는 환경이 있어 top-level import를 금지한다.
+pystock = None
 
 from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
@@ -129,7 +128,16 @@ class HantuStock:
                 else:
                     resp = requests.post(url, headers=headers, data=json.dumps(params), timeout=30)
                 r_headers = resp.headers
-                data = resp.json()
+                text_preview = (resp.text or "")[:300]
+                try:
+                    data = resp.json()
+                except ValueError as json_e:
+                    print(
+                        f"[WARN] KIS non-JSON response: status={resp.status_code}, "
+                        f"content_type={resp.headers.get('content-type')}, body={text_preview!r}"
+                    )
+                    return r_headers, {"rt_cd": "1", "msg_cd": "NON_JSON_RESPONSE", "msg1": "KIS non-JSON response"}
+
                 if data.get("rt_cd") != "0":
                     # 과호출 제한 등 재시도 케이스
                     if data.get("msg_cd") in {"EGW00201", "EGW00123"}:  # throttling 등
@@ -301,16 +309,18 @@ class HantuStock:
 
     @staticmethod
     def get_past_data_total(days: int = 10):
-        if pystock is None:
-            raise ImportError("pykrx not installed")
+        try:
+            from pykrx import stock as _pystock
+        except Exception as e:
+            raise ImportError(f"pykrx unavailable: {e}")
         total = None
         got = 0
         passed = 0
         today = datetime.now()
         while (got < days) and passed < max(10, days * 2):
             d = str(today - relativedelta(days=passed)).split(" ")[0]
-            k1 = pystock.get_market_ohlcv(d, market="KOSPI")
-            k2 = pystock.get_market_ohlcv(d, market="KOSDAQ")
+            k1 = _pystock.get_market_ohlcv(d, market="KOSPI")
+            k2 = _pystock.get_market_ohlcv(d, market="KOSDAQ")
             data = pd.concat([k1, k2])
             passed += 1
             if data["거래대금"].sum() == 0:
