@@ -29,7 +29,7 @@ _PROD_BASE_URL = "https://openapi.koreainvestment.com:9443"
 # Cache tokens per process and apply a cooldown after EGW00133 so repeated
 # chatbot requests do not keep calling /oauth2/token(P).
 _TOKEN_TTL_SEC = int(os.getenv("KIS_TOKEN_TTL_SEC", "82800"))  # 23h safety margin
-_TOKEN_COOLDOWN_SEC = int(os.getenv("KIS_TOKEN_COOLDOWN_SEC", "65"))
+_TOKEN_COOLDOWN_SEC = int(os.getenv("KIS_TOKEN_COOLDOWN_SEC", "70"))
 _token_cache: dict[tuple[str, str, str], tuple[str, float]] = {}
 _token_cooldown_until: dict[tuple[str, str, str], float] = {}
 
@@ -972,7 +972,7 @@ class HantuStock:
         requests의 json= 옵션으로 전송한다. 또한 국내주식 OpenAPI 예제에서
         주로 쓰이는 /oauth2/tokenP 를 우선 사용한다.
         """
-        key = _token_cache_key("prod-ranking", _PROD_BASE_URL, prod_key)
+        key = _token_cache_key("prod", _PROD_BASE_URL, prod_key)
         token = _cached_token(key)
         if token:
             return token
@@ -1022,6 +1022,14 @@ class HantuStock:
 
                 if error_code == "EGW00133":
                     _set_token_cooldown(key, _TOKEN_COOLDOWN_SEC)
+                    # Kakao synchronous requests should not normally block for 70s,
+                    # because Lambda/Kakao may time out. For manual tests or batch jobs,
+                    # set KIS_TOKEN_BLOCK_ON_RATE_LIMIT=true to wait once and retry.
+                    if (os.getenv("KIS_TOKEN_BLOCK_ON_RATE_LIMIT") or "").strip().lower() in {"1", "true", "yes", "y"}:
+                        print(f"[WARN] prod token rate limited; sleeping {_TOKEN_COOLDOWN_SEC}s before one retry")
+                        time.sleep(_TOKEN_COOLDOWN_SEC)
+                        _token_cooldown_until.pop(key, None)
+                        continue
                     return ""
 
                 # /oauth2/token에서 grant_type missing이 나오는 경우가 있어

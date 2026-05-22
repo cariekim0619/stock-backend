@@ -301,6 +301,68 @@ class ChatbotFavorites:
             print(f"[WARN] get_top_stocks KIS ranking failed: {e}")
             return []
 
+    def get_holdings_for_recommendation(self, limit: int = 5) -> List[Dict]:
+        """추천 종목 화면에 함께 보여줄 보유 종목 조회.
+
+        추천 종목용 KIS_ENV는 vps로 유지할 수 있으므로, 보유 종목은
+        KIS_TRANSACTION_* 전용 실전 credential을 우선 사용한다.
+        실패해도 추천 종목 응답 자체는 막지 않는다.
+        """
+        try:
+            from app.services.chatbot_report.HantuStock import HantuStock
+
+            tx_env = (os.environ.get("KIS_TRANSACTION_ENV") or "").strip()
+            tx_key = (os.environ.get("KIS_TRANSACTION_APP_KEY") or "").strip()
+            tx_secret = (os.environ.get("KIS_TRANSACTION_APP_SECRET") or "").strip()
+            tx_account = (os.environ.get("KIS_TRANSACTION_ACCOUNT_ID") or "").strip()
+            tx_suffix = (os.environ.get("KIS_TRANSACTION_ACCOUNT_SUFFIX") or "01").strip() or "01"
+
+            if tx_key and tx_secret and tx_account:
+                hantu = HantuStock(
+                    api_key=tx_key,
+                    secret_key=tx_secret,
+                    account_id=tx_account,
+                    account_suffix=tx_suffix,
+                    env=tx_env or "prod",
+                )
+            elif self._hantu:
+                hantu = self._hantu
+            else:
+                return []
+
+            rows = hantu.get_holding_stock_detail()
+            out: List[Dict] = []
+            for h in rows or []:
+                symbol = str(h.get("pdno") or "").strip()
+                name = str(h.get("prdt_name") or "").strip()
+                if not symbol or not name:
+                    continue
+                try:
+                    qty = int(float(h.get("hldg_qty") or 0))
+                except Exception:
+                    qty = 0
+                try:
+                    profit_rate = float(h.get("evlu_pfls_rt") or 0)
+                except Exception:
+                    profit_rate = 0.0
+                try:
+                    eval_amount = float(h.get("evlu_amt") or 0)
+                except Exception:
+                    eval_amount = 0.0
+                out.append({
+                    "symbol": symbol,
+                    "company_name": name,
+                    "quantity": qty,
+                    "eval_amount": eval_amount,
+                    "profit_rate": round(profit_rate, 2),
+                })
+                if len(out) >= int(limit or 5):
+                    break
+            return out
+        except Exception as e:
+            print(f"[WARN] recommendation holdings unavailable: {e}")
+            return []
+
     # ========================================
     # 현재가 조회 및 표시 형식
     # ========================================
@@ -762,7 +824,7 @@ class ChatbotFavorites:
             },
         }
 
-    def format_top_stocks_for_kakao(self, stocks: List[Dict], category: str) -> Dict:
+    def format_top_stocks_for_kakao(self, stocks: List[Dict], category: str, holdings: Optional[List[Dict]] = None) -> Dict:
         """
         추천 종목 리스트 출력
         """
@@ -780,10 +842,30 @@ class ChatbotFavorites:
             lines.append(f"{emoji} {s['company_name']} ({price_str} / {chg_emoji} {chg_str})")
 
         list_text = "\n".join(lines)
+
+        holdings = holdings or []
+        holding_lines = []
+        for i, h in enumerate(holdings[:5]):
+            emoji = NUM_EMOJIS[i]
+            qty = h.get("quantity", 0)
+            rate = h.get("profit_rate", 0)
+            try:
+                rate_val = float(rate or 0)
+            except Exception:
+                rate_val = 0.0
+            rate_emoji = "🔺" if rate_val > 0 else ("🔻" if rate_val < 0 else "➖")
+            holding_lines.append(f"{emoji} {h.get('company_name', '')} {qty:,}주 ({rate_emoji} {abs(rate_val):.1f}%)")
+
+        if holding_lines:
+            holdings_text = "\n\n📌 내 보유 종목\n" + "\n".join(holding_lines)
+        else:
+            holdings_text = "\n\n📌 내 보유 종목\n현재 조회 가능한 보유 종목이 없어요."
+
         text = (
             f"{category_label}을 기준으로 상위 5개 종목이에요!\n\n"
             f"📁[{category_label} TOP 5]\n\n"
-            f"{list_text}\n\n"
+            f"{list_text}"
+            f"{holdings_text}\n\n"
             "💡 마음에 드는 종목이 있다면 관심 종목으로 등록해보세요!"
         )
 
@@ -800,6 +882,16 @@ class ChatbotFavorites:
                         "volume": s.get("volume", 0),
                     }
                     for s in stocks[:5]
+                ],
+                "holdings": [
+                    {
+                        "ticker": h.get("symbol", ""),
+                        "name": h.get("company_name", ""),
+                        "quantity": h.get("quantity", 0),
+                        "eval_amount": h.get("eval_amount", 0),
+                        "profit_rate": h.get("profit_rate", 0),
+                    }
+                    for h in (holdings or [])[:5]
                 ],
             },
             "template": {

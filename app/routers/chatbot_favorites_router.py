@@ -488,9 +488,12 @@ def favorite_recommend(request: FavoriteRecommendRequest):
     if not stocks:
         return build_recommend_empty_response()
 
+    holdings = chatbot.get_holdings_for_recommendation(limit=5)
+
     return chatbot.format_top_stocks_for_kakao(
         stocks=stocks,
         category=category,
+        holdings=holdings,
     )
 
 
