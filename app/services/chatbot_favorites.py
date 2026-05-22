@@ -1,6 +1,6 @@
 import os
 import json
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
@@ -253,7 +253,7 @@ class ChatbotFavorites:
     # 추천 종목 (KIS ranking API only)
     # ========================================
 
-    def get_top_stocks(self, category: str = "volume") -> List[Dict]:
+    def get_top_stocks(self, category: str = "volume", segment: Optional[str] = None, profile: Optional[Dict[str, Any]] = None) -> List[Dict]:
         """
         추천 종목 조회
         - KIS ranking API만 사용한다.
@@ -293,12 +293,91 @@ class ChatbotFavorites:
                 except Exception as row_e:
                     print(f"[WARN] KIS ranking row parse failed: {row_e}; item={item}")
 
-            if not out:
-                print("[WARN] KIS ranking returned empty stocks")
-            return out
+            if out:
+                return out
+
+            print("[WARN] KIS ranking returned empty stocks; trying FDR fallback")
+            return self._get_fdr_top_stocks(cat, limit=5)
 
         except Exception as e:
-            print(f"[WARN] get_top_stocks KIS ranking failed: {e}")
+            print(f"[WARN] get_top_stocks KIS ranking failed: {e}; trying FDR fallback")
+            return self._get_fdr_top_stocks(cat, limit=5)
+
+    def _get_fdr_top_stocks(self, category: str = "volume", limit: int = 5) -> List[Dict]:
+        """KIS 랭킹이 토큰 제한/장외시간 등으로 실패할 때 쓰는 안전 fallback.
+
+        pykrx는 EC2에서 로그인/접속 이슈가 잦아 사용하지 않고,
+        FinanceDataReader의 KRX listing 컬럼이 제공될 때만 보조로 정렬한다.
+        """
+        try:
+            import FinanceDataReader as fdr
+            import pandas as pd
+        except Exception as e:
+            print(f"[WARN] FDR fallback unavailable: {e}")
+            return []
+
+        try:
+            df = fdr.StockListing("KRX")
+            if df is None or getattr(df, "empty", True):
+                return []
+
+            def _first_col(*names: str) -> str:
+                for name in names:
+                    if name in df.columns:
+                        return name
+                return ""
+
+            code_col = _first_col("Code", "Symbol", "종목코드")
+            name_col = _first_col("Name", "종목명")
+            price_col = _first_col("Close", "현재가")
+            volume_col = _first_col("Volume", "거래량")
+            rate_col = _first_col("ChagesRatio", "ChangesRatio", "ChangeRate", "등락률")
+            market_col = _first_col("Market", "시장구분")
+
+            if not code_col or not name_col:
+                print(f"[WARN] FDR fallback columns insufficient: {list(df.columns)}")
+                return []
+
+            work = df.copy()
+            if market_col:
+                work = work[work[market_col].astype(str).isin(["KOSPI", "KOSDAQ", "KONEX"])]
+
+            sort_col = volume_col if category == "volume" else rate_col
+            if not sort_col:
+                print(f"[WARN] FDR fallback sort column missing for category={category}")
+                return []
+
+            work[sort_col] = pd.to_numeric(work[sort_col], errors="coerce").fillna(0)
+            if price_col:
+                work[price_col] = pd.to_numeric(work[price_col], errors="coerce").fillna(0)
+            if rate_col:
+                work[rate_col] = pd.to_numeric(work[rate_col], errors="coerce").fillna(0)
+            if volume_col:
+                work[volume_col] = pd.to_numeric(work[volume_col], errors="coerce").fillna(0)
+
+            work = work.sort_values(sort_col, ascending=False)
+            out: List[Dict] = []
+            for _, row in work.head(max(int(limit or 5) * 3, 10)).iterrows():
+                code = str(row.get(code_col, "")).strip().zfill(6)
+                name = str(row.get(name_col, "")).strip()
+                if not code or not name or len(code) != 6:
+                    continue
+                upper_name = name.upper().replace(" ", "")
+                if any(tok in upper_name for tok in ("KODEX", "TIGER", "ACE", "KBSTAR", "SOL", "HANARO", "ARIRANG", "KOSEF", "ETF", "ETN")):
+                    continue
+                out.append({
+                    "symbol": code,
+                    "company_name": name,
+                    "current_price": int(float(row.get(price_col, 0) or 0)) if price_col else 0,
+                    "change_rate": round(float(row.get(rate_col, 0) or 0), 2) if rate_col else 0.0,
+                    "volume": int(float(row.get(volume_col, 0) or 0)) if volume_col else 0,
+                    "source": "fdr_fallback",
+                })
+                if len(out) >= int(limit or 5):
+                    break
+            return out
+        except Exception as e:
+            print(f"[WARN] FDR fallback failed: {e}")
             return []
 
     def get_holdings_for_recommendation(self, limit: int = 5) -> List[Dict]:

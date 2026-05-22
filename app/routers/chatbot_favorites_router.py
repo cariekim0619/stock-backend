@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -39,6 +39,8 @@ class FavoriteDeleteRequest(FavoriteBaseRequest):
 
 class FavoriteRecommendRequest(FavoriteBaseRequest):
     category: str = Field(..., description="volume 또는 return")
+    segment: Optional[str] = Field("risk-neutral", description="skip 또는 risk-* 세그먼트")
+    profile: Optional[Dict[str, Any]] = Field(None, description="설문 기반 개인화 프로필")
 
 
 class FavoriteSummaryRequest(FavoriteBaseRequest):
@@ -483,7 +485,7 @@ def favorite_recommend(request: FavoriteRecommendRequest):
     if category not in {"volume", "return"}:
         return build_recommend_category_invalid_response()
 
-    stocks = chatbot.get_top_stocks(category)
+    stocks = chatbot.get_top_stocks(category, segment=request.segment, profile=request.profile)
 
     if not stocks:
         return build_recommend_empty_response()

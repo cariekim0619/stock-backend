@@ -99,6 +99,7 @@ def build_prompt_suffix(segment: Optional[str], *, domain: str = "common", profi
         f"- 투자성향 세그먼트: {p['label']} ({p['score']}점 구간)\n"
         f"- 설명 렌즈: {p['tone']}\n"
         "- 최종 응답에는 '개인화 기준', '투자성향', '공격투자형/안정형 기준' 같은 라벨을 쓰지 않는다.\n"
+        "- 성향명 자체를 드러내지 말고 문장 톤과 체크 포인트에만 반영한다.\n"
         "- 같은 원자료라도 강조점, 리스크 표현, 예시 난이도를 다르게 작성한다.\n"
         "- 매수/매도 단정, 수익 보장, 직접 추천 표현은 금지한다.\n"
     )
@@ -142,7 +143,45 @@ def apply_personalization_to_raw_report(raw_report: Dict[str, Any], segment: Opt
     return raw_report
 
 
+def _sanitize_visible_personalization_labels(text: str) -> str:
+    if not isinstance(text, str):
+        return text
+    banned = (
+        "개인화 기준:",
+        "공격투자형 기준으로는",
+        "안정형 기준으로는",
+        "안정추구형 기준으로는",
+        "위험중립형 기준으로는",
+        "적극투자형 기준으로는",
+        "투자성향 기준으로는",
+    )
+    out = text
+    for token in banned:
+        out = out.replace(token, "")
+    return out.strip()
+
+
 def apply_personalization_to_kakao(skill: Dict[str, Any], segment: Optional[str], *, domain: str = "common") -> Dict[str, Any]:
-    # v4: Kakao 최종 응답에 노골적인 성향 안내문을 덧붙이지 않는다.
-    # 실제 차별화는 raw_report 섹션과 LLM prompt_suffix에서 처리한다.
+    # v5: Kakao 최종 응답에 노골적인 성향 안내문을 덧붙이지 않는다.
+    # 혹시 LLM/legacy formatter가 라벨을 누출하면 마지막 단계에서 제거한다.
+    if not isinstance(skill, dict):
+        return skill
+    template = skill.get("template")
+    if not isinstance(template, dict):
+        return skill
+    outputs = template.get("outputs")
+    if not isinstance(outputs, list):
+        return skill
+    for output in outputs:
+        if not isinstance(output, dict):
+            continue
+        simple = output.get("simpleText")
+        if isinstance(simple, dict) and isinstance(simple.get("text"), str):
+            simple["text"] = _sanitize_visible_personalization_labels(simple["text"])
+        card = output.get("basicCard")
+        if isinstance(card, dict):
+            if isinstance(card.get("title"), str):
+                card["title"] = _sanitize_visible_personalization_labels(card["title"])
+            if isinstance(card.get("description"), str):
+                card["description"] = _sanitize_visible_personalization_labels(card["description"])
     return skill
