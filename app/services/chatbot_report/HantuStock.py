@@ -1043,7 +1043,7 @@ class HantuStock:
         """
         if category == "volume":
             tr_id = "FHPST01710000"
-            path = "/uapi/domestic-stock/v1/ranking/volume"
+            path = "/uapi/domestic-stock/v1/quotations/volume-rank"
             scr_div = "20171"
             sort_cls = "0"
         else:
@@ -1095,15 +1095,95 @@ class HantuStock:
             print(f"[WARN] get_market_ranking: {res.get('msg1')}")
             return []
 
+        def _first(*values):
+            for v in values:
+                if v is None:
+                    continue
+                sv = str(v).strip()
+                if sv:
+                    return v
+            return ""
+
+        def _to_int(v):
+            try:
+                return int(float(str(v).replace(",", "").strip() or 0))
+            except Exception:
+                return 0
+
+        def _to_float(v):
+            try:
+                return float(str(v).replace(",", "").replace("%", "").strip() or 0)
+            except Exception:
+                return 0.0
+
+        def _is_etf_etn_name(name: str) -> bool:
+            n = (name or "").upper().replace(" ", "")
+            tokens = (
+                "KODEX", "TIGER", "ACE", "KBSTAR", "SOL", "HANARO",
+                "ARIRANG", "KOSEF", "TIMEFOLIO", "RISE", "PLUS",
+                "TREX", "마이티", "히어로즈", "FOCUS", "ETF", "ETN",
+            )
+            return any(tok in n for tok in tokens)
+
         result = []
-        for item in res.get("output", [])[:limit]:
+        output = res.get("output") or []
+
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+
+            symbol = str(_first(
+                item.get("stck_shrn_iscd"),
+                item.get("mksc_shrn_iscd"),
+                item.get("pdno"),
+                item.get("isu_cd"),
+                item.get("isu_srt_cd"),
+                item.get("stck_code"),
+            )).strip()
+
+            company_name = str(_first(
+                item.get("hts_kor_isnm"),
+                item.get("prdt_abrv_name"),
+                item.get("prdt_name"),
+                item.get("kor_isnm"),
+                item.get("isu_nm"),
+            )).strip()
+
+            if not symbol or not company_name:
+                continue
+
+            # 주식 리포트/뉴스 추천용이므로 ETF/ETN은 제외
+            if _is_etf_etn_name(company_name):
+                continue
+
             result.append({
-                "symbol":        item.get("stck_shrn_iscd", ""),
-                "company_name":  item.get("hts_kor_isnm", ""),
-                "current_price": int(item.get("stck_prpr", 0)),
-                "change_rate":   float(item.get("prdy_ctrt", 0)),
-                "volume":        int(item.get("acml_vol", 0)),
+                "symbol": symbol,
+                "company_name": company_name,
+                "current_price": _to_int(_first(
+                    item.get("stck_prpr"),
+                    item.get("stck_prdy_clpr"),
+                    item.get("prpr"),
+                )),
+                "change_rate": _to_float(_first(
+                    item.get("prdy_ctrt"),
+                    item.get("fluctuation_rate"),
+                    item.get("prdy_vrss_rate"),
+                )),
+                "volume": _to_int(_first(
+                    item.get("acml_vol"),
+                    item.get("cntg_vol"),
+                    item.get("trqu"),
+                    item.get("acc_trqu"),
+                )),
             })
+
+            if len(result) >= int(limit or 5):
+                break
+
+        if not result and output:
+            sample = output[0] if isinstance(output[0], dict) else {}
+            print(f"[WARN] get_market_ranking: parsed 0 rows; sample_keys={list(sample.keys())}")
+
         return result
 
     def get_transaction_summary(self, period: str = "1m") -> dict:
