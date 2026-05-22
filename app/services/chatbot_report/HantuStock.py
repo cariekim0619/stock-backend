@@ -945,7 +945,12 @@ class HantuStock:
         return result
 
     def _get_prod_token(self, prod_key: str, prod_secret: str) -> str:
-        """실전 API 토큰 조회. Process-wide cache + EGW00133 cooldown."""
+        """실전 시세/랭킹 API 토큰 조회. Process-wide cache + cooldown.
+
+        KIS client_credentials 토큰 발급은 JSON body를 엄격히 받는 편이라
+        requests의 json= 옵션으로 전송한다. 또한 국내주식 OpenAPI 예제에서
+        주로 쓰이는 /oauth2/tokenP 를 우선 사용한다.
+        """
         key = _token_cache_key("prod-ranking", _PROD_BASE_URL, prod_key)
         token = _cached_token(key)
         if token:
@@ -953,43 +958,62 @@ class HantuStock:
 
         _raise_if_token_cooldown(key)
 
-        url = _PROD_BASE_URL + "/oauth2/token"
         body = {
             "grant_type": "client_credentials",
-            "appkey": prod_key,
-            "appsecret": prod_secret,
+            "appkey": (prod_key or "").strip(),
+            "appsecret": (prod_secret or "").strip(),
         }
-        try:
-            res = requests.post(
-                url,
-                headers={"content-type": "application/json"},
-                data=json.dumps(body),
-                timeout=30,
-            )
-            try:
-                data = res.json()
-            except ValueError:
-                preview = (res.text or "")[:300]
-                print(f"[WARN] prod token non-JSON response: status={res.status_code}, body={preview!r}")
-                _set_token_cooldown(key, 15)
-                return ""
-
-            token = data.get("access_token", "")
-            if token:
-                _set_token_cache(key, token)
-                return token
-
-            error_code = data.get("error_code") or data.get("msg_cd") or data.get("code")
-            print(f"[WARN] prod token error: {data}")
-            if error_code == "EGW00133":
-                _set_token_cooldown(key, _TOKEN_COOLDOWN_SEC)
-            else:
-                _set_token_cooldown(key, 15)
-            return ""
-        except Exception as e:
-            print(f"[WARN] prod token request failed: {e}")
+        if not body["appkey"] or not body["appsecret"]:
+            print("[WARN] prod token unavailable: KIS_APP_KEY_PROD/KIS_APP_SECRET_PROD empty")
             _set_token_cooldown(key, 15)
             return ""
+
+        # tokenP를 우선 사용. 일부 계정/환경에서는 /oauth2/token이
+        # body를 인식하지 못해 EGW00115(grant_type required)를 반환할 수 있다.
+        token_paths = ["/oauth2/tokenP", "/oauth2/token"]
+
+        for token_path in token_paths:
+            url = _PROD_BASE_URL + token_path
+            try:
+                res = requests.post(
+                    url,
+                    headers={
+                        "Content-Type": "application/json; charset=utf-8",
+                        "Accept": "application/json",
+                    },
+                    json=body,
+                    timeout=30,
+                )
+                try:
+                    data = res.json()
+                except ValueError:
+                    preview = (res.text or "")[:300]
+                    print(f"[WARN] prod token non-JSON response: path={token_path}, status={res.status_code}, body={preview!r}")
+                    continue
+
+                token = data.get("access_token", "")
+                if token:
+                    _set_token_cache(key, token)
+                    return token
+
+                error_code = data.get("error_code") or data.get("msg_cd") or data.get("code")
+                print(f"[WARN] prod token error: path={token_path}, {data}")
+
+                if error_code == "EGW00133":
+                    _set_token_cooldown(key, _TOKEN_COOLDOWN_SEC)
+                    return ""
+
+                # /oauth2/token에서 grant_type missing이 나오는 경우가 있어
+                # 다른 token path를 한 번 더 시도한다.
+                if error_code == "EGW00115":
+                    continue
+
+            except Exception as e:
+                print(f"[WARN] prod token request failed: path={token_path}, error={e}")
+                continue
+
+        _set_token_cooldown(key, 15)
+        return ""
 
     def get_market_ranking(
         self,

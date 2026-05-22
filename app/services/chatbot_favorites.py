@@ -253,16 +253,11 @@ class ChatbotFavorites:
     # 추천 종목 (KIS ranking API only)
     # ========================================
 
-    # ========================================
-    # 추천 종목은 KIS ranking API만 사용한다.
-    # 과거 가격변동/외부 KRX fallback 경로는 사용하지 않는다.
-    # ========================================
-
     def get_top_stocks(self, category: str = "volume") -> List[Dict]:
         """
         추천 종목 조회
         - KIS ranking API만 사용한다.
-        - 외부 KRX fallback은 사용하지 않는다.
+        - pykrx/KRX 로그인 fallback은 사용하지 않는다.
         - 장외 시간, 권한, 키 설정, KIS non-JSON 응답 등으로 실패하면 빈 리스트를 반환하고
           router에서 사용자 안내 메시지를 내려준다.
         """
