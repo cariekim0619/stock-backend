@@ -12,10 +12,6 @@ try:
 except Exception:
     fdr = None
 
-# pykrx는 추천 종목 기능에서 사용하지 않는다.
-# import 시 KRX 로그인 경로가 실행되는 환경이 있어 top-level import를 금지한다.
-pystock = None
-
 from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 
@@ -309,31 +305,7 @@ class HantuStock:
 
     @staticmethod
     def get_past_data_total(days: int = 10):
-        try:
-            from pykrx import stock as _pystock
-        except Exception as e:
-            raise ImportError(f"pykrx unavailable: {e}")
-        total = None
-        got = 0
-        passed = 0
-        today = datetime.now()
-        while (got < days) and passed < max(10, days * 2):
-            d = str(today - relativedelta(days=passed)).split(" ")[0]
-            k1 = _pystock.get_market_ohlcv(d, market="KOSPI")
-            k2 = _pystock.get_market_ohlcv(d, market="KOSDAQ")
-            data = pd.concat([k1, k2])
-            passed += 1
-            if data["거래대금"].sum() == 0:
-                continue
-            got += 1
-            data.columns = ["open", "high", "low", "close", "volume", "trade_amount", "diff"]
-            data.index.name = "ticker"
-            data["timestamp"] = d
-            total = data.copy() if total is None else pd.concat([total, data])
-        total = total.sort_values("timestamp").reset_index()
-        for col in ["open", "high", "low"]:
-            total[col] = total[col].where(total[col] > 0, other=total["close"])
-        return total
+        raise RuntimeError("get_past_data_total is disabled in KIS-only backend. Use KIS quotation/ranking APIs instead.")
 
     # -------------------- 계좌 --------------------
     def _inquire_balance_raw(self, *, account_info=False):
