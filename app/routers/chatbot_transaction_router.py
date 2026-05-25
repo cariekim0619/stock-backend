@@ -24,11 +24,9 @@ async def get_transaction_report(req: TransactionReportRequest):
     try:
         if not req.is_account_linked:
             return service.format_account_not_linked_kakao()
-        if not req.symbol:
-            return service.format_stock_not_found_for_kakao()
         report = service.get_transaction_report(
-            symbol=req.symbol,
-            company_name=req.company_name or req.symbol,
+            symbol=req.symbol or "",
+            company_name=req.company_name or req.symbol or "전체 거래내역",
             period=req.period,
             segment=req.segment,
             profile=req.profile,

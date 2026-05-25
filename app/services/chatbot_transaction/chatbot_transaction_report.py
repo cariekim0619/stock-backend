@@ -82,9 +82,10 @@ class ChatbotTransactionReport:
     # 메인 API: 거래내역 리포트
     # ========================================
 
-    def get_transaction_report(self, symbol: str, company_name: str, period: str = "1m", segment: str = "risk-neutral", profile: Optional[Dict[str, Any]] = None) -> Dict:
+    def get_transaction_report(self, symbol: str = "", company_name: str = "전체 거래내역", period: str = "1m", segment: str = "risk-neutral", profile: Optional[Dict[str, Any]] = None) -> Dict:
         """
         거래내역 + 요약 리포트 (챗봇 말풍선 1+2 데이터)
+        symbol이 비어 있으면 선택 기간의 전체 거래내역을 종목 필터 없이 집계한다.
 
         Args:
             symbol: 종목코드 (예: "005930")
@@ -121,16 +122,23 @@ class ChatbotTransactionReport:
             print(f"[ERROR] get_transaction_report: transaction history failed: {e}")
             return self._error_response(str(e), segment=segment, period=period, symbol=symbol, company_name=company_name)
 
-        # 2단계: 해당 종목 필터링
-        stock_transactions = [
-            t for t in (transactions or []) if str(t.get("pdno", "")).strip() == str(symbol).strip()
-        ]
+        # 2단계: 종목 필터링. symbol이 비어 있으면 기간 내 전체 거래내역을 사용한다.
+        symbol = str(symbol or "").strip()
+        is_all_transactions = not bool(symbol)
+        if is_all_transactions:
+            stock_transactions = list(transactions or [])
+            company_name = company_name or "전체 거래내역"
+        else:
+            stock_transactions = [
+                t for t in (transactions or []) if str(t.get("pdno", "")).strip() == symbol
+            ]
 
         # 거래내역 없음
         if not stock_transactions:
             return {
                 "symbol": symbol,
-                "company_name": company_name,
+                "company_name": company_name or ("전체 거래내역" if is_all_transactions else "종목"),
+                "is_all_transactions": is_all_transactions,
                 "no_transaction": True,
                 "generated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 "segment": segment,
@@ -155,8 +163,9 @@ class ChatbotTransactionReport:
 
         return {
             "symbol": symbol,
-            "company_name": company_name,
-            "period_days": min(actual_days, self.DEFAULT_PERIOD_DAYS),
+            "company_name": company_name or ("전체 거래내역" if is_all_transactions else symbol),
+            "is_all_transactions": is_all_transactions,
+            "period_days": actual_days,
             "period_insufficient": period_insufficient,
             "summary": summary,
             "rag_analysis": rag_analysis,
@@ -229,7 +238,8 @@ class ChatbotTransactionReport:
         if not self.genai:
             return self._fallback_analysis(summary, segment=segment)
 
-        prompt = f"""다음은 '{company_name}' 종목의 최근 {period_days}일간 거래내역 요약입니다.
+        target_label = company_name or "전체 거래내역"
+        prompt = f"""다음은 '{target_label}'의 최근 {period_days}일간 거래내역 요약입니다.
 
 {trade_info}
 
@@ -284,7 +294,9 @@ class ChatbotTransactionReport:
             qty = t.get("tot_ccld_qty") or 0
             price = float(t.get("avg_prvs") or 0)
             amount = float(t.get("tot_ccld_amt") or 0)
-            lines.append(f"  {formatted_date} {side} {qty}주 @ {price:,.0f}원 (총 {amount:,.0f}원)")
+            stock_name = str(t.get("prdt_name") or t.get("pdno") or "").strip()
+            name_prefix = f" {stock_name}" if stock_name else ""
+            lines.append(f"  {formatted_date}{name_prefix} {side} {qty}주 @ {price:,.0f}원 (총 {amount:,.0f}원)")
 
         return "\n".join(lines)
 
@@ -427,9 +439,10 @@ class ChatbotTransactionReport:
 
         company = report.get("company_name", "종목")
         symbol = report.get("symbol", "")
+        is_all_transactions = bool(report.get("is_all_transactions")) or not str(symbol or "").strip()
         period_days = report.get("period_days", 30)
         requested_period = str(report.get("period") or "1m").strip()
-        period_label_map = {"today": "오늘", "1w": "최근 1주일", "1m": "최근 1개월", "3m": "최근 3개월", "1y": "최대 기간"}
+        period_label_map = {"today": "오늘", "1w": "최근 1주일", "1m": "최근 1개월", "3m": "최근 3개월", "1y": "최근 1년"}
         display_period = period_label_map.get(requested_period, f"최근 {period_days}일")
         summary = report.get("summary", {})
         rag = report.get("rag_analysis", {})
@@ -442,7 +455,8 @@ class ChatbotTransactionReport:
         profit = summary.get("realized_profit", 0)
         profit_sign = "+" if profit >= 0 else ""
 
-        message_1 = f"📑 {company} 거래내역 요약이에요!\n\n"
+        title_target = "전체 거래내역" if is_all_transactions else company
+        message_1 = f"📑 {title_target} 요약이에요!\n\n"
         message_1 += f"• 거래 기간 : {display_period}\n"
         message_1 += f"• 거래 횟수 : 총{summary.get('total_trades', 0)}회"
         message_1 += f" (매수{summary.get('buy_trades', 0)}회/ 매도{summary.get('sell_trades', 0)}회)\n"
@@ -529,13 +543,13 @@ class ChatbotTransactionReport:
         """
         거래내역 없음 시 카카오톡 응답
         """
-        period_label = {"today": "오늘", "1w": "최근 1주일", "1m": "최근 1개월", "3m": "최근 3개월", "1y": "최대 기간"}.get(period, "선택한 기간")
+        period_label = {"today": "오늘", "1w": "최근 1주일", "1m": "최근 1개월", "3m": "최근 3개월", "1y": "최근 1년"}.get(period, "선택한 기간")
         return {
             "version": "2.0",
             "template": {
                 "outputs": [{
                     "simpleText": {
-                        "text": f"⚠️ {period_label} 동안\n{company_name}의 거래내역이 없어요.\n\n기간을 더 길게 선택하거나 다른 종목을 입력해주세요."
+                        "text": (f"⚠️ {period_label} 동안\n거래내역이 없어요.\n\n기간을 더 길게 선택하거나 종목별 조회를 이용해 주세요." if not str(symbol or "").strip() else f"⚠️ {period_label} 동안\n{company_name}의 거래내역이 없어요.\n\n기간을 더 길게 선택하거나 다른 종목을 입력해주세요.")
                     }
                 }],
                 "quickReplies": [
