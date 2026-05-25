@@ -60,49 +60,6 @@ def _raise_if_token_cooldown(key: tuple[str, str, str]) -> None:
         raise RuntimeError(f"KIS token cooldown active; retry after {remain}s")
     _token_cooldown_until.pop(key, None)
 
-def _digits_only(value: str | None) -> str:
-    return "".join(ch for ch in str(value or "") if ch.isdigit())
-
-
-def _split_account_no(account_id: str | None, account_suffix: str | None = None) -> tuple[str, str]:
-    """Return (CANO, ACNT_PRDT_CD) from separate fields or a full 8-2/10 digit account number."""
-    raw_id = str(account_id or "").strip()
-    raw_suffix = str(account_suffix or "").strip()
-
-    # Accept common KIS account formats: 12345678-01, 1234567801, or separate 8 + 2.
-    if "-" in raw_id and not raw_suffix:
-        left, right = raw_id.split("-", 1)
-        return _digits_only(left)[:8], (_digits_only(right) or "01")[:2]
-
-    digits = _digits_only(raw_id)
-    suffix_digits = _digits_only(raw_suffix)
-    if len(digits) >= 10 and not suffix_digits:
-        return digits[:8], digits[8:10]
-    return digits[:8], (suffix_digits or "01")[:2]
-
-
-def _kis_env_from_any(value: str | None) -> str:
-    env = str(value or "prod").strip().lower()
-    if env in {"paper", "demo", "sandbox", "vts", "vps"}:
-        return "vps"
-    if env in {"real", "prod", "production"}:
-        return "prod"
-    raise ValueError("env must be one of {'prod','real','vps','paper','demo','sandbox','vts'}")
-
-
-def _safe_int(value, default: int = 0) -> int:
-    try:
-        return int(float(str(value or "0").replace(",", "").strip() or 0))
-    except Exception:
-        return default
-
-
-def _safe_float(value, default: float = 0.0) -> float:
-    try:
-        return float(str(value or "0").replace(",", "").replace("%", "").strip() or 0)
-    except Exception:
-        return default
-
 
 class HantuStock:
     def __init__(
@@ -113,24 +70,22 @@ class HantuStock:
         account_suffix: str | None = None,
         *,
         env: str | None = None,
-        access_token: str | None = None,
     ):
         """
         env: "prod"(실전) | "vps"(모의)
         - 인자를 생략하면 .env 값을 사용함
           KIS_APP_KEY, KIS_APP_SECRET, KIS_ACCOUNT_ID, KIS_ACCOUNT_SUFFIX(optional), KIS_ENV(optional)
         """
-        self._api_key = (api_key or os.getenv("KIS_APP_KEY", "")).strip()
-        self._secret_key = (secret_key or os.getenv("KIS_APP_SECRET", "")).strip()
+        self._api_key = api_key or os.getenv("KIS_APP_KEY", "").strip()
+        self._secret_key = secret_key or os.getenv("KIS_APP_SECRET", "").strip()
+        self._account_id = account_id or os.getenv("KIS_ACCOUNT_ID", "").strip()
+        self._account_suffix = (account_suffix or os.getenv("KIS_ACCOUNT_SUFFIX", "01")).strip() or "01"
 
-        env_account = os.getenv("KIS_ACCOUNT_ID", "").strip()
-        env_suffix = os.getenv("KIS_ACCOUNT_SUFFIX", "01").strip() or "01"
-        self._account_id, self._account_suffix = _split_account_no(
-            account_id or env_account,
-            account_suffix or env_suffix,
-        )
-
-        self._env = _kis_env_from_any(env or os.getenv("KIS_ENV", "prod"))
+        _env = (env or os.getenv("KIS_ENV", "prod")).strip().lower()
+        if _env not in {"prod", "vps", "paper", "demo", "sandbox", "vts"}:
+            raise ValueError("env must be one of {'prod','vps'}; alias {'paper','demo','sandbox'} allowed")
+        # alias 처리
+        self._env = "vps" if _env in {"vps", "paper", "demo", "sandbox", "vts"} else "prod"
 
         # 필수값 검증
         missing = [k for k, v in {
@@ -149,12 +104,10 @@ class HantuStock:
             if self._env == "prod"
             else "https://openapivts.koreainvestment.com:29443"
         )
-        # Do not issue token at construction time unless Lambda already passed a valid token.
+        # Do not issue token at construction time.
         # Ranking/recommendation can create multiple HantuStock instances in a short time;
         # token issuance happens lazily in _header() and is cached process-wide.
-        self._access_token = (access_token or "").strip() or None
-        if self._access_token:
-            _set_token_cache(_token_cache_key(self._env, self._base_url, self._api_key), self._access_token)
+        self._access_token = None
 
     # -------------------- 내부 공통 --------------------
     def _tr(self, key: str) -> str:
@@ -247,13 +200,11 @@ class HantuStock:
     def _header(self, tr_id: str) -> dict:
         token = self._ensure_access_token()
         return {
-            "content-type": "application/json; charset=utf-8",
-            "accept": "application/json",
+            "content-type": "application/json",
             "appkey": self._api_key,
             "appsecret": self._secret_key,
             "authorization": f"Bearer {token}",
             "tr_id": tr_id,
-            "custtype": "P",
         }
 
 
@@ -485,30 +436,24 @@ class HantuStock:
                 "CANO": self._account_id,
                 "ACNT_PRDT_CD": self._account_suffix,
                 "AFHR_FLPR_YN": "N",
-                "OFL_YN": "",
-                "INQR_DVSN": os.getenv("KIS_BALANCE_INQR_DVSN", "01"),
+                "OFL_YN": "N",
+                "INQR_DVSN": "01",
                 "UNPR_DVSN": "01",
                 "FUND_STTL_ICLD_YN": "N",
                 "FNCG_AMT_AUTO_RDPT_YN": "N",
-                "PRCS_DVSN": os.getenv("KIS_BALANCE_PRCS_DVSN", "00"),
+                "PRCS_DVSN": "01",
                 "CTX_AREA_FK100": fk100,
                 "CTX_AREA_NK100": nk100,
             }
             url = self._base_url + "/uapi/domestic-stock/v1/trading/inquire-balance"
             hd, res = self._request(url, headers, params)
-            if res.get("rt_cd") != "0":
-                print(f"[WARN] inquire_balance failed: {res.get('msg1') or res}")
-                return {} if account_info else out
             if account_info:
-                output2 = res.get("output2") or [{}]
-                if isinstance(output2, dict):
-                    return output2
-                return output2[0] if output2 else {}
-            cont = str(hd.get("tr_cont") or "").strip() in {"F", "M"}
+                return res.get("output2", [{}])[0]
+            cont = hd.get("tr_cont") in {"F", "M"}
             headers["tr_cont"] = "N"
             fk100 = res.get("ctx_area_fk100", "")
             nk100 = res.get("ctx_area_nk100", "")
-            out += res.get("output1", []) or []
+            out += res.get("output1", [])
         return out
 
     def get_holding_stock(self, ticker: str | None = None, *, remove_stock_warrant: bool = True):
@@ -920,28 +865,43 @@ class HantuStock:
         start_date: str = None,
         end_date: str = None,
         period: str = "1m",
-        sll_buy_dvsn: str = "00",
-        pdno: str = "",
+        sll_buy_dvsn: str = "00"
     ) -> list:
         """
-        주식일별주문체결조회.
+        주식일별주문체결조회 (기획 2-4: 거래 내역 리포트)
 
-        Hotfix: Stockpia 챗봇 거래내역은 우선 최근 1개월만 사용한다.
-        패치 전 안정 동작하던 TTTC/VTTC8001R + 기존 파라미터 조합으로 되돌리고,
-        3개월 이전/이후 분기 조회는 사용하지 않는다.
+        Args:
+            start_date: 조회시작일자 (YYYYMMDD), None이면 period로 계산
+            end_date: 조회종료일자 (YYYYMMDD), None이면 오늘
+            period: 기간 ("1m": 1개월, "3m": 3개월, "1y": 1년)
+            sll_buy_dvsn: 매도매수구분 ("00":전체, "01":매도, "02":매수)
 
-        pdno 인자는 기존 호출 호환을 위해 받지만, KIS 조회는 계좌의 최근 1개월
-        체결내역을 받은 뒤 상위 서비스에서 종목코드로 필터링한다.
+        Returns:
+            list[dict]: 거래내역 리스트
+                - ord_dt: 주문일자
+                - pdno: 종목코드
+                - prdt_name: 종목명
+                - sll_buy_dvsn_cd: 매도매수구분 (01:매도, 02:매수)
+                - sll_buy_dvsn_cd_name: 매도매수구분명
+                - ord_qty: 주문수량
+                - tot_ccld_qty: 총체결수량
+                - avg_prvs: 체결평균가
+                - tot_ccld_amt: 총체결금액
         """
-        # 주식거래내역은 현재 1개월만 운영한다. 오래된 user.json/요청이 와도 1개월로 고정한다.
-        period = "1m"
-
+        # 날짜 계산
         today = datetime.now()
         if end_date is None:
             end_date = today.strftime("%Y%m%d")
 
         if start_date is None:
-            start_date = (today - relativedelta(months=1)).strftime("%Y%m%d")
+            period_map = {
+                "1w": relativedelta(weeks=1),
+                "1m": relativedelta(months=1),
+                "3m": relativedelta(months=3),
+                "1y": relativedelta(years=1),
+            }
+            delta = period_map.get(period, relativedelta(months=1))
+            start_date = (today - delta).strftime("%Y%m%d")
 
         # VPS(모의투자) 모드: KIS API output1 미지원 → 로컬 로그 사용
         if self._env == "vps":
@@ -952,11 +912,8 @@ class HantuStock:
         cont = True
         fk100 = ""
         nk100 = ""
-        max_pages = int(os.getenv("KIS_DAILY_CCLD_MAX_PAGES", "10"))
-        page = 0
 
-        while cont and page < max_pages:
-            page += 1
+        while cont:
             params = {
                 "CANO": self._account_id,
                 "ACNT_PRDT_CD": self._account_suffix,
@@ -977,46 +934,35 @@ class HantuStock:
             hd, res = self._request(url, headers, params)
 
             if res.get("rt_cd") != "0":
-                print(f"[ERROR] get_transaction_history: {res.get('msg1') or res}")
+                print(f"[ERROR] get_transaction_history: {res.get('msg1')}")
                 break
 
-            cont = str(hd.get("tr_cont") or "").strip() in {"F", "M"}
+            cont = hd.get("tr_cont") in {"F", "M"}
             headers["tr_cont"] = "N"
             fk100 = res.get("ctx_area_fk100", "")
             nk100 = res.get("ctx_area_nk100", "")
-            rows = res.get("output1", []) or []
-            if isinstance(rows, dict):
-                rows = [rows]
-            out += rows
+            out += res.get("output1", [])
 
-            if cont and not fk100 and not nk100:
-                break
-
+        # 필요한 필드만 추출하여 정리
         result = []
-        seen = set()
         for r in out:
-            ccld_qty = _safe_int(r.get("tot_ccld_qty"))
+            # 체결수량이 0인 건 제외 (미체결)
+            ccld_qty = int(r.get("tot_ccld_qty", 0))
             if ccld_qty == 0:
                 continue
 
-            row = {
+            result.append({
                 "ord_dt": r.get("ord_dt", ""),
                 "pdno": r.get("pdno", ""),
                 "prdt_name": r.get("prdt_name", ""),
                 "sll_buy_dvsn_cd": r.get("sll_buy_dvsn_cd", ""),
                 "sll_buy_dvsn_cd_name": r.get("sll_buy_dvsn_cd_name", ""),
-                "ord_qty": _safe_int(r.get("ord_qty")),
+                "ord_qty": int(r.get("ord_qty", 0)),
                 "tot_ccld_qty": ccld_qty,
-                "avg_prvs": _safe_float(r.get("avg_prvs")),
-                "tot_ccld_amt": _safe_float(r.get("tot_ccld_amt")),
-            }
-            key = (row["ord_dt"], row["pdno"], row["sll_buy_dvsn_cd"], row["ord_qty"], row["tot_ccld_amt"])
-            if key in seen:
-                continue
-            seen.add(key)
-            result.append(row)
+                "avg_prvs": float(r.get("avg_prvs", 0)),
+                "tot_ccld_amt": float(r.get("tot_ccld_amt", 0)),
+            })
 
-        result.sort(key=lambda x: (x.get("ord_dt") or "", x.get("pdno") or ""))
         return result
 
     def _get_prod_token(self, prod_key: str, prod_secret: str) -> str:
@@ -1156,38 +1102,22 @@ class HantuStock:
             base_url = self._base_url
             headers = self._header(tr_id)
 
-        if category == "volume":
-            # Official sample for volume-rank uses upper-case parameter names and does not accept rank_sort/prc_cls keys.
-            params = {
-                "FID_COND_MRKT_DIV_CODE": market,
-                "FID_COND_SCR_DIV_CODE": scr_div,
-                "FID_INPUT_ISCD": "0000",
-                "FID_DIV_CLS_CODE": "0",
-                "FID_BLNG_CLS_CODE": "0",
-                "FID_TRGT_CLS_CODE": "0",
-                "FID_TRGT_EXLS_CLS_CODE": "0000000000",
-                "FID_INPUT_PRICE_1": "",
-                "FID_INPUT_PRICE_2": "",
-                "FID_VOL_CNT": "",
-                "FID_INPUT_DATE_1": "",
-            }
-        else:
-            params = {
-                "fid_cond_mrkt_div_code": market,
-                "fid_cond_scr_div_code": scr_div,
-                "fid_input_iscd": "0000",
-                "fid_rank_sort_cls_code": "0000",
-                "fid_input_cnt_1": str(max(int(limit or 5), 5)),
-                "fid_prc_cls_code": "0",
-                "fid_input_price_1": "",
-                "fid_input_price_2": "",
-                "fid_vol_cnt": "",
-                "fid_trgt_cls_code": "0",
-                "fid_trgt_exls_cls_code": "0",
-                "fid_div_cls_code": "0",
-                "fid_rsfl_rate1": "",
-                "fid_rsfl_rate2": "",
-            }
+        params = {
+            "fid_cond_mrkt_div_code":  market,
+            "fid_cond_scr_div_code":   scr_div,
+            "fid_input_iscd":          "0000",
+            "fid_rank_sort_cls_code":  sort_cls,
+            "fid_input_cnt_1":         "0",
+            "fid_prc_cls_code":        "0",
+            "fid_input_price_1":       "",
+            "fid_input_price_2":       "",
+            "fid_vol_cnt":             "",
+            "fid_trgt_cls_code":       "0",
+            "fid_trgt_exls_cls_code":  "0",
+            "fid_div_cls_code":        "0",
+            "fid_rsfl_rate1":          "",
+            "fid_rsfl_rate2":          "",
+        }
 
         _, res = self._request(base_url + path, headers, params)
         if res.get("rt_cd") != "0":
