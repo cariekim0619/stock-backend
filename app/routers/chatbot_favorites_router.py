@@ -1,4 +1,5 @@
 from typing import Dict, List, Optional, Any
+import time
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -504,8 +505,10 @@ def favorite_holdings(request: FavoriteBaseRequest):
     추천 종목 응답에는 더 이상 보유 종목을 섞지 않고,
     Lambda가 보유 종목 버튼을 눌렀을 때 이 엔드포인트만 호출한다.
     """
+    started = time.time()
     chatbot = ChatbotFavorites()
     holdings = chatbot.get_holdings_for_recommendation(limit=10)
+    print(f"[TIME] favorites/holdings rows={len(holdings or [])} elapsed={time.time() - started:.3f}s")
 
     if not holdings:
         return build_simple_text_response(
