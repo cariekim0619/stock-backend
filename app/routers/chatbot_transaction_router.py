@@ -55,7 +55,7 @@ async def get_transaction_report(req: TransactionReportRequest):
         report = service.get_transaction_report(
             symbol=req.symbol,
             company_name=req.company_name or req.symbol,
-            period=req.period,
+            period="1m",
             segment=req.segment,
             profile=req.profile,
             hantu_override=hantu_override,

@@ -163,8 +163,7 @@ class HantuStock:
             "inquire-balance": "8434R",
             "order-buy": "0012U",
             "order-sell": "0011U",
-            # 공식 KIS 샘플 기준: 3개월 이내 주식일별주문체결조회는 TTTC/VTTC0081R.
-            "inquire-daily-ccld": "0081R",
+            "inquire-daily-ccld": "8001R",  # 주식일별주문체결조회 (3개월 이내)
             "inquire-pending": "8036R",     # 미체결 주문 조회
             "order-cancel": "0803U",        # 주문 취소
         }
@@ -916,72 +915,6 @@ class HantuStock:
         return round(running_avg, 2)
 
     # -------------------- 거래내역 조회 --------------------
-    def _daily_ccld_tr_id(self, pd_dv: str) -> str:
-        """Official KIS sample TR IDs for domestic-stock daily filled orders."""
-        if self._env == "prod":
-            return "CTSC9215R" if pd_dv == "before" else "TTTC0081R"
-        return "VTSC9215R" if pd_dv == "before" else "VTTC0081R"
-
-    def _fetch_transaction_history_segment(
-        self,
-        *,
-        start_date: str,
-        end_date: str,
-        sll_buy_dvsn: str = "00",
-        pdno: str = "",
-        pd_dv: str = "inner",
-    ) -> list:
-        headers = self._header(self._daily_ccld_tr_id(pd_dv))
-        out = []
-        cont = True
-        fk100 = ""
-        nk100 = ""
-        max_pages = int(os.getenv("KIS_DAILY_CCLD_MAX_PAGES", "20"))
-        page = 0
-
-        while cont and page < max_pages:
-            page += 1
-            params = {
-                "CANO": self._account_id,
-                "ACNT_PRDT_CD": self._account_suffix,
-                "INQR_STRT_DT": start_date,
-                "INQR_END_DT": end_date,
-                "SLL_BUY_DVSN_CD": sll_buy_dvsn,
-                "PDNO": pdno,
-                "CCLD_DVSN": "00",
-                "INQR_DVSN": "00",
-                "INQR_DVSN_3": "00",
-                "ORD_GNO_BRNO": "",
-                "ODNO": "",
-                "INQR_DVSN_1": "",
-                "CTX_AREA_FK100": fk100,
-                "CTX_AREA_NK100": nk100,
-            }
-            excg = (os.getenv("KIS_EXCG_ID_DVSN_CD") or "KRX").strip()
-            if excg:
-                params["EXCG_ID_DVSN_CD"] = excg
-
-            url = self._base_url + "/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
-            hd, res = self._request(url, headers, params)
-
-            if res.get("rt_cd") != "0":
-                print(f"[ERROR] get_transaction_history[{pd_dv}]: {res.get('msg1') or res}")
-                break
-
-            rows = res.get("output1", []) or []
-            if isinstance(rows, dict):
-                rows = [rows]
-            out += rows
-
-            cont = str(hd.get("tr_cont") or "").strip() in {"F", "M"}
-            headers["tr_cont"] = "N"
-            fk100 = res.get("ctx_area_fk100", "")
-            nk100 = res.get("ctx_area_nk100", "")
-            if not fk100 and not nk100 and cont:
-                break
-
-        return out
-
     def get_transaction_history(
         self,
         start_date: str = None,
@@ -992,57 +925,80 @@ class HantuStock:
     ) -> list:
         """
         주식일별주문체결조회.
-        공식 KIS 샘플의 TTTC/VTTC0081R(3개월 이내), CTSC/VTSC9215R(3개월 이전) 규격을 반영한다.
+
+        Hotfix: Stockpia 챗봇 거래내역은 우선 최근 1개월만 사용한다.
+        패치 전 안정 동작하던 TTTC/VTTC8001R + 기존 파라미터 조합으로 되돌리고,
+        3개월 이전/이후 분기 조회는 사용하지 않는다.
+
+        pdno 인자는 기존 호출 호환을 위해 받지만, KIS 조회는 계좌의 최근 1개월
+        체결내역을 받은 뒤 상위 서비스에서 종목코드로 필터링한다.
         """
+        # 주식거래내역은 현재 1개월만 운영한다. 오래된 user.json/요청이 와도 1개월로 고정한다.
+        period = "1m"
+
         today = datetime.now()
         if end_date is None:
             end_date = today.strftime("%Y%m%d")
 
         if start_date is None:
-            period_map = {
-                "1w": relativedelta(weeks=1),
-                "1m": relativedelta(months=1),
-                "3m": relativedelta(months=3),
-                "1y": relativedelta(years=1),
-            }
-            delta = period_map.get(period, relativedelta(months=1))
-            start_date = (today - delta).strftime("%Y%m%d")
+            start_date = (today - relativedelta(months=1)).strftime("%Y%m%d")
 
+        # VPS(모의투자) 모드: KIS API output1 미지원 → 로컬 로그 사용
         if self._env == "vps":
             return self._read_transaction_log(start_date, end_date, sll_buy_dvsn)
 
-        def _dt(s: str):
-            return datetime.strptime(s, "%Y%m%d")
+        headers = self._header(self._tr("inquire-daily-ccld"))
+        out = []
+        cont = True
+        fk100 = ""
+        nk100 = ""
+        max_pages = int(os.getenv("KIS_DAILY_CCLD_MAX_PAGES", "10"))
+        page = 0
 
-        boundary = today - relativedelta(months=3)
-        start_dt = _dt(start_date)
-        end_dt = _dt(end_date)
+        while cont and page < max_pages:
+            page += 1
+            params = {
+                "CANO": self._account_id,
+                "ACNT_PRDT_CD": self._account_suffix,
+                "INQR_STRT_DT": start_date,
+                "INQR_END_DT": end_date,
+                "SLL_BUY_DVSN_CD": sll_buy_dvsn,
+                "INQR_DVSN": "00",
+                "PDNO": "",
+                "CCLD_DVSN": "00",
+                "ORD_GNO_BRNO": "",
+                "ODNO": "",
+                "INQR_DVSN_3": "00",
+                "INQR_DVSN_1": "",
+                "CTX_AREA_FK100": fk100,
+                "CTX_AREA_NK100": nk100,
+            }
+            url = self._base_url + "/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
+            hd, res = self._request(url, headers, params)
 
-        raw_rows = []
-        if end_dt < boundary:
-            raw_rows += self._fetch_transaction_history_segment(
-                start_date=start_date, end_date=end_date, sll_buy_dvsn=sll_buy_dvsn, pdno=pdno, pd_dv="before"
-            )
-        elif start_dt >= boundary:
-            raw_rows += self._fetch_transaction_history_segment(
-                start_date=start_date, end_date=end_date, sll_buy_dvsn=sll_buy_dvsn, pdno=pdno, pd_dv="inner"
-            )
-        else:
-            before_end = (boundary - relativedelta(days=1)).strftime("%Y%m%d")
-            inner_start = boundary.strftime("%Y%m%d")
-            raw_rows += self._fetch_transaction_history_segment(
-                start_date=start_date, end_date=before_end, sll_buy_dvsn=sll_buy_dvsn, pdno=pdno, pd_dv="before"
-            )
-            raw_rows += self._fetch_transaction_history_segment(
-                start_date=inner_start, end_date=end_date, sll_buy_dvsn=sll_buy_dvsn, pdno=pdno, pd_dv="inner"
-            )
+            if res.get("rt_cd") != "0":
+                print(f"[ERROR] get_transaction_history: {res.get('msg1') or res}")
+                break
+
+            cont = str(hd.get("tr_cont") or "").strip() in {"F", "M"}
+            headers["tr_cont"] = "N"
+            fk100 = res.get("ctx_area_fk100", "")
+            nk100 = res.get("ctx_area_nk100", "")
+            rows = res.get("output1", []) or []
+            if isinstance(rows, dict):
+                rows = [rows]
+            out += rows
+
+            if cont and not fk100 and not nk100:
+                break
 
         result = []
         seen = set()
-        for r in raw_rows:
+        for r in out:
             ccld_qty = _safe_int(r.get("tot_ccld_qty"))
             if ccld_qty == 0:
                 continue
+
             row = {
                 "ord_dt": r.get("ord_dt", ""),
                 "pdno": r.get("pdno", ""),

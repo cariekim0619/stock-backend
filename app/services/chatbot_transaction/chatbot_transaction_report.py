@@ -114,6 +114,8 @@ class ChatbotTransactionReport:
             }
         """
         segment = normalize_segment(segment)
+        # Hotfix: 주식거래내역은 현재 최근 1개월만 운영한다.
+        period = "1m"
         # 1단계: 거래내역 조회
         try:
             hantu = hantu_override or self._get_hantu()
