@@ -428,6 +428,9 @@ class ChatbotTransactionReport:
         company = report.get("company_name", "종목")
         symbol = report.get("symbol", "")
         period_days = report.get("period_days", 30)
+        requested_period = str(report.get("period") or "1m").strip()
+        period_label_map = {"today": "오늘", "1w": "최근 1주일", "1m": "최근 1개월", "3m": "최근 3개월", "1y": "최대 기간"}
+        display_period = period_label_map.get(requested_period, f"최근 {period_days}일")
         summary = report.get("summary", {})
         rag = report.get("rag_analysis", {})
         web_url = report.get("web_url", "https://securities.koreainvestment.com/app/mtsrenewal.jsp?type=06&SSO_SCREENNO=0800")
@@ -440,7 +443,7 @@ class ChatbotTransactionReport:
         profit_sign = "+" if profit >= 0 else ""
 
         message_1 = f"📑 {company} 거래내역 요약이에요!\n\n"
-        message_1 += f"• 거래 기간 : 최근{period_days}일\n"
+        message_1 += f"• 거래 기간 : {display_period}\n"
         message_1 += f"• 거래 횟수 : 총{summary.get('total_trades', 0)}회"
         message_1 += f" (매수{summary.get('buy_trades', 0)}회/ 매도{summary.get('sell_trades', 0)}회)\n"
         message_1 += f"• 총 매수금액 : {buy_amount_str}원\n"
@@ -448,7 +451,7 @@ class ChatbotTransactionReport:
         message_1 += f"• 실현손익(매도 기준) : {profit_sign}{profit:,.0f}원"
 
         if period_insufficient:
-            message_1 = f"최근 30일 동안의 거래내역은 없지만,\n최근 {period_days}일 동안 거래한 내역이 있어요.\n\n이 거래내역을 기준으로\n요약 리포트를 작성해드릴게요 !\n잠시만 기다려주세요!\n\n{message_1}"
+            message_1 = f"선택한 기간 안에서 거래내역을 확인했어요.\n\n이 거래내역을 기준으로\n요약 리포트를 작성해드릴게요 !\n잠시만 기다려주세요!\n\n{message_1}"
 
         # 말풍선 2: 거래 패턴 해설 (RAG)
         message_2 = "📑 요약 리포트\n\n"
@@ -526,7 +529,7 @@ class ChatbotTransactionReport:
         """
         거래내역 없음 시 카카오톡 응답
         """
-        period_label = {"1w": "최근 1주일", "1m": "최근 1개월", "3m": "최근 3개월", "1y": "최근 1년"}.get(period, "선택한 기간")
+        period_label = {"today": "오늘", "1w": "최근 1주일", "1m": "최근 1개월", "3m": "최근 3개월", "1y": "최대 기간"}.get(period, "선택한 기간")
         return {
             "version": "2.0",
             "template": {

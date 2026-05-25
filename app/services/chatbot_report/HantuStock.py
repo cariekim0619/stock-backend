@@ -895,6 +895,7 @@ class HantuStock:
 
         if start_date is None:
             period_map = {
+                "today": relativedelta(days=0),
                 "1w": relativedelta(weeks=1),
                 "1m": relativedelta(months=1),
                 "3m": relativedelta(months=3),

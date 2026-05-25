@@ -216,21 +216,21 @@ class ChatbotNewsCommunity:
 
         prompt = f"""
 다음은 '{company_name}' 종목에 대한 투자자 의견들입니다.
-이 중에서 가장 대표적인 의견 3개를 짧은 문장으로 요약해주세요.
+실제 게시글 내용에서 반복되는 구체적인 투자자 의견만 3개 뽑아주세요.
 
 {chr(10).join(contents)}
 
 조건:
-- 각 의견은 15자 이내
-- 투자자 관점으로 요약
-- 따옴표 없이 문장만
+- 출력은 의견 3줄만 작성
+- 각 의견은 18자 이내
+- 헤더, 설명, 따옴표, 번호, 종목명 반복 금지
+- "주가 전망과 전략이 중요", "변동성 크고 투자주의 필요"처럼 모든 종목에 적용되는 일반론 금지
+- 원문에 근거가 부족하면 억지로 만들지 말고 1~2개만 작성
 
-예시:
-실적 바닥은 지난 것 같다
-외국인 수급이 계속 유입 중
+좋은 예시:
+실적 바닥은 지난 듯
+외국인 수급 유입 중
 단기 급등은 부담
-
-대표 의견 3개:
 """ + build_prompt_suffix(segment, domain="community", profile=profile)
         try:
             model = self.genai.GenerativeModel('gemini-2.5-flash')
@@ -241,14 +241,13 @@ class ChatbotNewsCommunity:
                 line = line.strip()
                 if not line:
                     continue
-                # LLM이 반복하는 헤더/라벨 제거
-                if '대표' in line and ('의견' in line or '3개' in line) and line.endswith(':'):
+                # LLM이 반복하는 헤더/라벨/일반론 제거
+                if any(tok in line for tok in ["대표", "의견 3", "3개", "다음은", "종목에 대한"]):
                     continue
-                # 번호 접두사 제거 (1. 2. 등)
                 line = re.sub(r'^\d+[\.\)]\s*', '', line)
-                # bullet 접두사 제거
-                line = re.sub(r'^[\-\•\*]\s*', '', line).strip()
-                if line:
+                line = re.sub(r'^[\-\•\*]\s*', '', line).strip().strip("\"'“”‘’")
+                generic = {"주가 전망과 전략이 중요", "변동성 크고 투자주의 필요", "투자주의 필요", "전략이 중요"}
+                if line and line not in generic and len(line) <= 40:
                     opinions.append(line)
             return opinions[:3]
         except Exception:
@@ -320,14 +319,6 @@ class ChatbotNewsCommunity:
 
         # 핵심 이슈로 변환 (3-5개)
         key_issues = self._convert_to_key_issues(filtered_news[:5], company_name, segment=segment, profile=profile)
-        lens = get_personalization_note(segment, domain="news")
-        if lens and key_issues:
-            # 첫 이슈 제목 뒤에 자연스러운 해석 렌즈를 짧게 녹임
-            first = key_issues[0]
-            title = first.get("title", "")
-            if title and lens not in title:
-                first["title"] = f"{title} ({lens})"
-
         return {
             "symbol": symbol,
             "company_name": company_name,
@@ -387,21 +378,23 @@ class ChatbotNewsCommunity:
             news_list.append(f"{i}. [{title}] {content}")
 
         prompt = f"""
-다음은 '{company_name}' 관련 뉴스입니다.
-각 뉴스를 투자자가 이해하기 쉽게 한 문장으로 요약해주세요.
+다음은 '{company_name}' 관련 뉴스 후보입니다.
+'{company_name}'와 직접 관련된 뉴스만 투자자가 이해하기 쉽게 한 문장으로 요약해주세요.
+직접 관련이 없으면 해당 줄은 반드시 '제외'라고만 쓰세요.
 
 {chr(10).join(news_list)}
 
 조건:
 - 각 이슈는 25자 이내
 - "~했어요", "~예요" 형태의 친근한 말투
+- 광범위한 경제뉴스, 업종 전체 뉴스, 기업명이 없는 뉴스는 제외
+- "관련이 아니에요", "특정 기업 소식 없이", "기본 관점" 같은 문구 출력 금지
 - 핵심만 간결하게
 
 예시:
 2분기 실적이 시장 예상치를 상회했어요
-반도체 업황 회복 기대가 언급되고 있어요
-
-핵심 이슈 요약:
+제외
+반도체 업황 회복 기대가 언급됐어요
 """ + build_prompt_suffix(segment, domain="news", profile=profile)
         try:
             model = self.genai.GenerativeModel('gemini-2.5-flash')
@@ -412,20 +405,22 @@ class ChatbotNewsCommunity:
                 line = line.strip()
                 if not line:
                     continue
-                # LLM이 반복하는 헤더/라벨 제거
                 if '핵심' in line and '이슈' in line and line.endswith(':'):
                     continue
-                # 번호 접두사 제거 (1. 2. 등)
                 line = re.sub(r'^\d+[\.\)]\s*', '', line)
-                # bullet 접두사 제거
-                line = re.sub(r'^[\-\•\*]\s*', '', line).strip()
-                if line:
-                    summaries.append(line)
+                line = re.sub(r'^[\-\•\*]\s*', '', line).strip().strip("\"'“”‘’")
+                if not line or line == "제외":
+                    continue
+                if any(bad in line for bad in ["관련이 아니", "특정 기업 소식 없이", "기본 관점", "주요 경제뉴스"]):
+                    continue
+                summaries.append(line)
 
             # 원본 데이터와 결합
             key_issues = []
             for i, item in enumerate(items):
                 summary = summaries[i] if i < len(summaries) else item.get("title", "")
+                if any(bad in str(summary) for bad in ["관련이 아니", "특정 기업 소식 없이", "기본 관점", "주요 경제뉴스", "제외"]):
+                    continue
                 key_issues.append({
                     "title": summary,
                     "source": item.get("source", ""),
@@ -542,10 +537,11 @@ class ChatbotNewsCommunity:
         timestamp = summary.get("timestamp", "최근")
         segment = normalize_segment(summary.get("segment"))
 
-        # 핵심 이슈 텍스트
-        issues_text = "\n".join([f"• {issue['title']}" for issue in key_issues])
-
-        message = f"""{timestamp} {company_name} 관련
+        if not key_issues:
+            message = f"최근 {company_name}와 직접 관련된 주요 뉴스를 찾지 못했어요.\n\n잠시 후 다시 확인해 주세요."
+        else:
+            issues_text = "\n".join([f"• {issue['title']}" for issue in key_issues])
+            message = f"""{timestamp} {company_name} 관련
 주요 뉴스도 정리해봤어요.
 
 {issues_text}"""

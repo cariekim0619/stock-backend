@@ -490,13 +490,63 @@ def favorite_recommend(request: FavoriteRecommendRequest):
     if not stocks:
         return build_recommend_empty_response()
 
-    holdings = chatbot.get_holdings_for_recommendation(limit=5)
-
+    # 추천 종목과 보유 종목은 화면/응답 데이터를 분리한다.
     return chatbot.format_top_stocks_for_kakao(
         stocks=stocks,
         category=category,
-        holdings=holdings,
     )
+
+
+@router.post("/holdings")
+def favorite_holdings(request: FavoriteBaseRequest):
+    """
+    보유 종목 단독 조회.
+    추천 종목 응답에는 더 이상 보유 종목을 섞지 않고,
+    Lambda가 보유 종목 버튼을 눌렀을 때 이 엔드포인트만 호출한다.
+    """
+    chatbot = ChatbotFavorites()
+    holdings = chatbot.get_holdings_for_recommendation(limit=10)
+
+    if not holdings:
+        return build_simple_text_response(
+            "현재 조회 가능한 보유 종목이 없어요.",
+            [build_quick_reply(label="메인으로", message_text="메인으로", block_id="main_block")],
+        )
+
+    number_emojis = ["➊", "➋", "➌", "➍", "➎", "➏", "➐", "➑", "➒", "➓"]
+    lines = []
+    for idx, h in enumerate(holdings[:10]):
+        rate = float(h.get("profit_rate") or 0)
+        mark = "🔺" if rate > 0 else ("🔻" if rate < 0 else "➖")
+        lines.append(f"{number_emojis[idx]} {h.get('company_name', '')} {int(h.get('quantity') or 0):,}주 ({mark} {abs(rate):.1f}%)")
+
+    return {
+        "version": "2.0",
+        "data": {
+            "holdings": [
+                {
+                    "ticker": h.get("symbol", ""),
+                    "symbol": h.get("symbol", ""),
+                    "pdno": h.get("symbol", ""),
+                    "name": h.get("company_name", ""),
+                    "company_name": h.get("company_name", ""),
+                    "prdt_name": h.get("company_name", ""),
+                    "quantity": h.get("quantity", 0),
+                    "hldg_qty": h.get("quantity", 0),
+                    "eval_amount": h.get("eval_amount", 0),
+                    "profit_rate": h.get("profit_rate", 0),
+                    "evlu_pfls_rt": h.get("profit_rate", 0),
+                }
+                for h in holdings[:10]
+            ]
+        },
+        "template": {
+            "outputs": [{"simpleText": {"text": "📁 내 보유 종목\n\n" + "\n".join(lines)}}],
+            "quickReplies": [
+                build_quick_reply(label="메인으로", message_text="메인으로", block_id="main_block"),
+            ],
+        },
+    }
 
 
 @router.post("/summary")

@@ -905,7 +905,8 @@ class ChatbotFavorites:
 
     def format_top_stocks_for_kakao(self, stocks: List[Dict], category: str, holdings: Optional[List[Dict]] = None) -> Dict:
         """
-        추천 종목 리스트 출력
+        추천 종목 리스트 출력.
+        보유 종목은 추천 종목 화면/데이터에 포함하지 않는다.
         """
         category_label = "거래량" if category == "volume" else "상승률"
         opposite_label = "상승률 TOP5" if category == "volume" else "거래량 TOP5"
@@ -914,38 +915,19 @@ class ChatbotFavorites:
         lines = []
         for i, s in enumerate(stocks[:5]):
             emoji = NUM_EMOJIS[i]
-            chg = s["change_rate"]
+            chg = s.get("change_rate", 0) or 0
             chg_emoji = "🔺" if chg > 0 else ("🔻" if chg < 0 else "➖")
             chg_str = f"{abs(chg):.1f}%"
-            price_str = f"{s['current_price']:,}원"
-            lines.append(f"{emoji} {s['company_name']} ({price_str} / {chg_emoji} {chg_str})")
+            price_str = f"{int(s.get('current_price') or 0):,}원"
+            lines.append(f"{emoji} {s.get('company_name', '')} ({price_str} / {chg_emoji} {chg_str})")
 
         list_text = "\n".join(lines)
-
-        holdings = holdings or []
-        holding_lines = []
-        for i, h in enumerate(holdings[:5]):
-            emoji = NUM_EMOJIS[i]
-            qty = h.get("quantity", 0)
-            rate = h.get("profit_rate", 0)
-            try:
-                rate_val = float(rate or 0)
-            except Exception:
-                rate_val = 0.0
-            rate_emoji = "🔺" if rate_val > 0 else ("🔻" if rate_val < 0 else "➖")
-            holding_lines.append(f"{emoji} {h.get('company_name', '')} {qty:,}주 ({rate_emoji} {abs(rate_val):.1f}%)")
-
-        if holding_lines:
-            holdings_text = "\n\n📌 내 보유 종목\n" + "\n".join(holding_lines)
-        else:
-            holdings_text = "\n\n📌 내 보유 종목\n현재 조회 가능한 보유 종목이 없어요."
 
         text = (
             f"{category_label}을 기준으로 상위 5개 종목이에요!\n\n"
             f"📁[{category_label} TOP 5]\n\n"
-            f"{list_text}"
-            f"{holdings_text}\n\n"
-            "💡 마음에 드는 종목이 있다면 관심 종목으로 등록해보세요!"
+            f"{list_text}\n\n"
+            "💡 마음에 드는 종목이 있다면 하단의 종목명 버튼을 눌러 확인해보세요!"
         )
 
         return {
@@ -961,16 +943,6 @@ class ChatbotFavorites:
                         "volume": s.get("volume", 0),
                     }
                     for s in stocks[:5]
-                ],
-                "holdings": [
-                    {
-                        "ticker": h.get("symbol", ""),
-                        "name": h.get("company_name", ""),
-                        "quantity": h.get("quantity", 0),
-                        "eval_amount": h.get("eval_amount", 0),
-                        "profit_rate": h.get("profit_rate", 0),
-                    }
-                    for h in (holdings or [])[:5]
                 ],
             },
             "template": {

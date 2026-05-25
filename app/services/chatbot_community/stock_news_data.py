@@ -87,7 +87,7 @@ class StockNewsDataProvider:
 
         # 2단계 필터링
         raw_results = search_result.get("results", [])
-        filtered_news = self._filter_investment_news(raw_results)
+        filtered_news = self._filter_investment_news(raw_results, company_name=company_name, symbol=symbol)
 
         # 페이징
         start_idx = (page - 1) * limit
@@ -117,11 +117,31 @@ class StockNewsDataProvider:
             "fetched_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
 
-    def _filter_investment_news(self, results: List[Dict]) -> List[Dict]:
+    def _normalize_text(self, value: str) -> str:
+        import re
+        return re.sub(r"[^0-9A-Za-z가-힣]", "", str(value or "")).lower()
+
+    def _is_company_relevant(self, item: Dict, company_name: str = "", symbol: str = "") -> bool:
+        title = item.get("title", "")
+        content = item.get("content", "")
+        url = item.get("url", "")
+        raw_text = f"{title} {content} {url}"
+        text = self._normalize_text(raw_text)
+        name_key = self._normalize_text(company_name)
+        symbol_key = self._normalize_text(symbol)
+        if any(bad in raw_text for bad in ["관련이 아니", "무관", "특정 기업 소식 없이"]):
+            return False
+        if name_key and name_key in text:
+            return True
+        if symbol_key and symbol_key in text:
+            return True
+        return False
+
+    def _filter_investment_news(self, results: List[Dict], company_name: str = "", symbol: str = "") -> List[Dict]:
         """
         투자 관련 뉴스 2단계 필터링
-        1단계: 키워드 필터
-        2단계: LLM 분류 (선택)
+        1단계: 해당 기업명/티커 직접 관련성 확인
+        2단계: 투자 키워드 확인
         """
         filtered = []
 
@@ -130,12 +150,11 @@ class StockNewsDataProvider:
             content = item.get("content", "")
             text = f"{title} {content}".lower()
 
-            # 1단계: 키워드 필터
+            if not self._is_company_relevant(item, company_name=company_name, symbol=symbol):
+                continue
+
             if any(kw in text for kw in self.investment_keywords):
                 filtered.append(item)
-
-        # 2단계: LLM 분류 (API 호출 비용 고려하여 선택적)
-        # 실제 운영 시 self._llm_classify_news(filtered) 활성화
 
         return filtered
 
