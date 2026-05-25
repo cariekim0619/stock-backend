@@ -82,7 +82,7 @@ class ChatbotTransactionReport:
     # 메인 API: 거래내역 리포트
     # ========================================
 
-    def get_transaction_report(self, symbol: str, company_name: str, period: str = "1m", segment: str = "risk-neutral", profile: Optional[Dict[str, Any]] = None) -> Dict:
+    def get_transaction_report(self, symbol: str, company_name: str, period: str = "1m", segment: str = "risk-neutral", profile: Optional[Dict[str, Any]] = None, hantu_override=None) -> Dict:
         """
         거래내역 + 요약 리포트 (챗봇 말풍선 1+2 데이터)
 
@@ -116,7 +116,8 @@ class ChatbotTransactionReport:
         segment = normalize_segment(segment)
         # 1단계: 거래내역 조회
         try:
-            transactions = self._get_hantu().get_transaction_history(period=period)
+            hantu = hantu_override or self._get_hantu()
+            transactions = hantu.get_transaction_history(period=period, pdno=str(symbol or "").strip())
         except Exception as e:
             print(f"[ERROR] get_transaction_report: transaction history failed: {e}")
             return self._error_response(str(e), segment=segment, period=period, symbol=symbol, company_name=company_name)
