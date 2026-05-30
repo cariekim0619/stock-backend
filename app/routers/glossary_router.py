@@ -5,6 +5,17 @@ from typing import Optional, Dict, Any
 # 서비스 import
 from app.services.chatbot_glossary.chatbot_glossary import ChatbotGlossary
 
+
+
+def _safe_error_kakao(message: str = "지금은 요약 생성이 잠시 불안정해요. 잠시 후 다시 시도해 주세요."):
+    return {
+        "version": "2.0",
+        "template": {
+            "outputs": [{"simpleText": {"text": message}}],
+            "quickReplies": [{"action": "message", "label": "메인으로", "messageText": "메인으로"}],
+        },
+    }
+
 router = APIRouter(prefix="/chatbot/glossary", tags=["Chatbot Glossary"])
 
 # 앱 시작 시 1번만 생성해서 재사용

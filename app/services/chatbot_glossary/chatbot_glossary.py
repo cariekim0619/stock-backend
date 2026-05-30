@@ -34,8 +34,8 @@ class ChatbotGlossary:
     # 카카오 simpleText 최대 글자 수를 고려한 안전 길이
     # 보수적으로 700자 내외를 목표로 생성하고
     # 마지막 후처리에서는 900자 기준으로 한 번 더 잘라줍니다.
-    MAX_PROMPT_RESPONSE_CHARS = 700
-    MAX_FINAL_RESPONSE_CHARS = 900
+    MAX_PROMPT_RESPONSE_CHARS = 520
+    MAX_FINAL_RESPONSE_CHARS = 760
 
     # 기획안 카테고리별 대표 용어
     CATEGORIES = {
@@ -316,7 +316,8 @@ class ChatbotGlossary:
 - 새로운 정의를 만들지 마세요
 - 투자 판단이나 의견을 제시하지 마세요
 - 쉽고 친근한 말투를 사용하세요
-- 각 항목은 1~2문장으로 간결하게 작성하세요
+- 각 항목은 1문장으로만 작성하세요
+- 헷갈리기 쉬운 용어 설명은 용어당 35자 이내로 작성하세요
 - 전체 답변은 {self.MAX_PROMPT_RESPONSE_CHARS}자 이내로 작성하세요
 - 카카오톡 메시지 길이 제한을 고려하여 불필요하게 길게 쓰지 마세요""" + build_prompt_suffix(segment, domain="glossary", profile=profile)
 
@@ -581,27 +582,53 @@ class ChatbotGlossary:
             },
         }
 
+    def _split_explanation_outputs(self, explanation: str) -> List[Dict]:
+        """카카오 말풍선 1개가 잘리지 않도록 용어 설명을 2~3개 simpleText로 나눈다."""
+        text = self._clean_llm_text(explanation or "")
+        if not text:
+            return [{"simpleText": {"text": "설명 데이터가 준비 중이에요."}}]
+
+        # ➍ 앞에서 나누면 ➊~➌ / ➍~➎ 구조가 가장 자연스럽다.
+        idx = text.find("➍")
+        if idx > 0:
+            first = text[:idx].strip()
+            second = text[idx:].strip()
+            outputs = [
+                {"simpleText": {"text": self._safe_truncate_text(first, 900)}},
+                {"simpleText": {"text": self._safe_truncate_text(second, 900)}},
+            ]
+        else:
+            outputs = []
+            cur = ""
+            for block in re.split(r"\n\s*\n", text):
+                block = block.strip()
+                if not block:
+                    continue
+                if cur and len(cur) + len(block) + 2 > 900:
+                    outputs.append({"simpleText": {"text": self._safe_truncate_text(cur, 900)}})
+                    cur = block
+                else:
+                    cur = block if not cur else cur + "\n\n" + block
+            if cur:
+                outputs.append({"simpleText": {"text": self._safe_truncate_text(cur, 900)}})
+
+        guide = "궁금한 용어가 있으면 계속 입력해 주세요."
+        joined = "\n".join(o.get("simpleText", {}).get("text", "") for o in outputs)
+        if guide not in joined:
+            outputs.append({"simpleText": {"text": guide}})
+        return outputs[:3]
+
     def format_explanation_for_kakao(self, result: Dict) -> Dict:
         """
         용어 설명 카카오 응답
 
-        기획: 용어 설명 후 [다른 용어 질문 / 종료] 퀵 버튼
+        기획: 용어 설명 후 계속 입력 안내 + 종료 퀵 버튼
         """
         return {
             "version": "2.0",
             "template": {
-                "outputs": [{
-                    "simpleText": {
-                        "text": self._safe_truncate_text(result["explanation"])
-                    }
-                }],
+                "outputs": self._split_explanation_outputs(result["explanation"]),
                 "quickReplies": [
-                    {
-                        "action": "block",
-                        "label": "다른 용어 질문",
-                        "messageText": "다른 용어",
-                        "blockId": "glossary_entry_block",
-                    },
                     {
                         "action": "block",
                         "label": "종료",
