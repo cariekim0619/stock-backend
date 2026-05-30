@@ -13,6 +13,7 @@ import os
 from typing import Dict, List, Optional
 from datetime import datetime
 from dotenv import load_dotenv
+from app.services.segment_personalization import build_prompt_suffix, normalize_segment
 
 load_dotenv()
 
@@ -65,6 +66,17 @@ class ChatbotStockReport:
         else:
             self.genai = None
 
+
+
+    def _personalized_prompt(
+        self,
+        prompt: str,
+        *,
+        segment: str = "risk-neutral",
+        domain: str = "report",
+        profile: Optional[Dict] = None,
+    ) -> str:
+        return str(prompt or "") + build_prompt_suffix(normalize_segment(segment), domain=domain, profile=profile)
 
     # ========================================
     # 데이터 수집
@@ -180,7 +192,7 @@ class ChatbotStockReport:
         except Exception:
             return None
 
-    def _generate_investment_summary_text(self, data: Dict, company_name: str) -> Dict:
+    def _generate_investment_summary_text(self, data: Dict, company_name: str, segment: str = "risk-neutral", profile: Optional[Dict] = None) -> Dict:
         """투자 요약 텍스트 생성"""
         info = data.get("info", {})
         fundamental = data.get("fundamental", {})
@@ -222,6 +234,7 @@ RSI: {rsi_info.get('value', 'N/A')} ({rsi_info.get('signal', {}).get('descriptio
 • [포인트3]
 ✔️ [체크포인트]"""
 
+        prompt = self._personalized_prompt(prompt, segment=segment, domain="report", profile=profile)
         result = self._generate_llm_text(prompt)
 
         if result:
@@ -240,7 +253,7 @@ RSI: {rsi_info.get('value', 'N/A')} ({rsi_info.get('signal', {}).get('descriptio
             "checkpoint": "주요 체크 포인트는 실적 흐름과 시장 환경 변화예요."
         }
 
-    def _generate_financial_text(self, data: Dict, company_name: str) -> Dict:
+    def _generate_financial_text(self, data: Dict, company_name: str, segment: str = "risk-neutral", profile: Optional[Dict] = None) -> Dict:
         """재무 분석 텍스트 생성"""
         fundamental = data.get("fundamental", {})
         dart = data.get("dart", {})
@@ -286,6 +299,7 @@ ROE: {fundamental.get('roe', 'N/A')}%{dart_section}
 • [포인트3]
 ✔️ [체크포인트]"""
 
+        prompt = self._personalized_prompt(prompt, segment=segment, domain="report", profile=profile)
         result = self._generate_llm_text(prompt)
 
         if result:
@@ -303,7 +317,7 @@ ROE: {fundamental.get('roe', 'N/A')}%{dart_section}
             "checkpoint": "재무 안정성 측면의 상세 분석은 웹 리포트를 참고해주세요."
         }
 
-    def _generate_valuation_text(self, data: Dict, company_name: str) -> str:
+    def _generate_valuation_text(self, data: Dict, company_name: str, segment: str = "risk-neutral", profile: Optional[Dict] = None) -> str:
         """밸류에이션 해석 텍스트 생성"""
         fundamental = data.get("fundamental", {})
 
@@ -317,6 +331,7 @@ PER: {fundamental.get('per', 'N/A')} / PBR: {fundamental.get('pbr', 'N/A')} / RO
 - 인사말이나 서두 없이 바로 해석만 작성
 - 위에 제공된 데이터만 언급하세요. 데이터에 없는 지표는 언급하지 마세요."""
 
+        prompt = self._personalized_prompt(prompt, segment=segment, domain="report", profile=profile)
         result = self._generate_llm_text(prompt)
         if result:
             import re
@@ -336,7 +351,7 @@ PER: {fundamental.get('per', 'N/A')} / PBR: {fundamental.get('pbr', 'N/A')} / RO
 
         return "밸류에이션 데이터를 확인 중이에요."
 
-    def _generate_opinion_text(self, data: Dict, company_name: str) -> Dict:
+    def _generate_opinion_text(self, data: Dict, company_name: str, segment: str = "risk-neutral", profile: Optional[Dict] = None) -> Dict:
         """투자 의견 텍스트 생성"""
         info = data.get("info", {})
         fundamental = data.get("fundamental", {})
@@ -365,6 +380,7 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
 • [의견3]
 👉 [리스크 주의사항]"""
 
+        prompt = self._personalized_prompt(prompt, segment=segment, domain="report", profile=profile)
         result = self._generate_llm_text(prompt)
 
         if result:
@@ -408,7 +424,7 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
     # 리포트 요약 (1차 결과)
     # ========================================
 
-    def get_report_summary(self, symbol: str, company_name: str) -> Dict:
+    def get_report_summary(self, symbol: str, company_name: str, segment: str = "risk-neutral", profile: Optional[Dict] = None) -> Dict:
         """
         종목 리포트 요약 (1차 결과)
 
@@ -451,7 +467,7 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
             rsi_signal = str(rsi_signal_data)
 
         # 투자 요약 텍스트 생성
-        summary_content = self._generate_investment_summary_text(data, company_name)
+        summary_content = self._generate_investment_summary_text(data, company_name, segment=segment, profile=profile)
         summary_text = "\n".join([f"• {p}" for p in summary_content.get("points", [])])
         if summary_content.get("checkpoint"):
             summary_text += f"\n\n✔️ {summary_content['checkpoint']}"
@@ -485,7 +501,13 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
     # ========================================
 
     def get_section_detail(
-        self, symbol: str, company_name: str, section: str, raw_data: Optional[Dict] = None
+        self,
+        symbol: str,
+        company_name: str,
+        section: str,
+        raw_data: Optional[Dict] = None,
+        segment: str = "risk-neutral",
+        profile: Optional[Dict] = None,
     ) -> Dict:
         """
         주제별 상세 조회
@@ -514,7 +536,7 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
         }
 
         builder = section_builders[section]
-        content = builder(data, company_name)
+        content = builder(data, company_name, segment=segment, profile=profile)
 
         return {
             "section": section,
@@ -525,11 +547,11 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
             "generated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         }
 
-    def _build_investment_summary(self, data: Dict, company_name: str) -> Dict:
+    def _build_investment_summary(self, data: Dict, company_name: str, segment: str = "risk-neutral", profile: Optional[Dict] = None) -> Dict:
         """투자 요약 섹션 빌드"""
-        return self._generate_investment_summary_text(data, company_name)
+        return self._generate_investment_summary_text(data, company_name, segment=segment, profile=profile)
 
-    def _build_price_trend(self, data: Dict, company_name: str) -> Dict:
+    def _build_price_trend(self, data: Dict, company_name: str, segment: str = "risk-neutral", profile: Optional[Dict] = None) -> Dict:
         """주가 동향 섹션 빌드"""
         returns = data.get("returns", {})
         technical = data.get("technical", {})
@@ -563,14 +585,14 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
             }
         }
 
-    def _build_financial_analysis(self, data: Dict, company_name: str) -> Dict:
+    def _build_financial_analysis(self, data: Dict, company_name: str, segment: str = "risk-neutral", profile: Optional[Dict] = None) -> Dict:
         """재무 분석 섹션 빌드"""
-        return self._generate_financial_text(data, company_name)
+        return self._generate_financial_text(data, company_name, segment=segment, profile=profile)
 
-    def _build_valuation(self, data: Dict, company_name: str) -> Dict:
+    def _build_valuation(self, data: Dict, company_name: str, segment: str = "risk-neutral", profile: Optional[Dict] = None) -> Dict:
         """밸류에이션 섹션 빌드"""
         fundamental = data.get("fundamental", {})
-        interpretation = self._generate_valuation_text(data, company_name)
+        interpretation = self._generate_valuation_text(data, company_name, segment=segment, profile=profile)
 
         return {
             "metrics": {
@@ -581,15 +603,15 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
             "interpretation": interpretation,
         }
 
-    def _build_investment_opinion(self, data: Dict, company_name: str) -> Dict:
+    def _build_investment_opinion(self, data: Dict, company_name: str, segment: str = "risk-neutral", profile: Optional[Dict] = None) -> Dict:
         """투자 의견 섹션 빌드"""
-        return self._generate_opinion_text(data, company_name)
+        return self._generate_opinion_text(data, company_name, segment=segment, profile=profile)
 
     # ========================================
     # 전체 확인하기
     # ========================================
 
-    def get_all_sections(self, symbol: str, company_name: str) -> Dict:
+    def get_all_sections(self, symbol: str, company_name: str, segment: str = "risk-neutral", profile: Optional[Dict] = None) -> Dict:
         """
         전체 확인하기 (1~5번 각 2~3줄 압축)
 
@@ -616,7 +638,7 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
         sections = {}
 
         # 투자 요약
-        summary = self._generate_investment_summary_text(data, company_name)
+        summary = self._generate_investment_summary_text(data, company_name, segment=segment, profile=profile)
         points = summary.get("points", [])
         sections["investment_summary"] = ", ".join(points[:2]) if points else "데이터 준비 중"
 
@@ -630,7 +652,7 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
         sections["price_trend"] = f"1개월 {r1m}% / 3개월 {r3m}% / 1년 {r1y}%, RSI {rsi_desc}"
 
         # 재무 분석
-        fin = self._generate_financial_text(data, company_name)
+        fin = self._generate_financial_text(data, company_name, segment=segment, profile=profile)
         fin_points = fin.get("points", [])
         sections["financial_analysis"] = ", ".join(fin_points[:2]) if fin_points else "데이터 준비 중"
 
@@ -638,11 +660,11 @@ RSI: {rsi_info.get('value', 'N/A')} / 추세: {trend.get('description', 'N/A')}
         per = fundamental.get("per", "N/A")
         pbr = fundamental.get("pbr", "N/A")
         roe = fundamental.get("roe", "N/A")
-        val_text = self._generate_valuation_text(data, company_name)
+        val_text = self._generate_valuation_text(data, company_name, segment=segment, profile=profile)
         sections["valuation"] = f"PER {per} / PBR {pbr} / ROE {roe}%, {val_text[:30]}"
 
         # 투자 의견
-        opinion = self._generate_opinion_text(data, company_name)
+        opinion = self._generate_opinion_text(data, company_name, segment=segment, profile=profile)
         op_points = opinion.get("points", [])
         sections["investment_opinion"] = ", ".join(op_points[:2]) if op_points else "데이터 준비 중"
 

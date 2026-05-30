@@ -10,6 +10,7 @@ Chatbot_05 뉴스/커뮤니티 API
 """
 
 import os
+import re
 from typing import Dict, List, Optional
 from datetime import datetime
 from dotenv import load_dotenv
@@ -46,6 +47,82 @@ class ChatbotNewsCommunity:
                 self.genai = None
         else:
             self.genai = None
+
+
+    def _clean_search_text(self, value: str, limit: int = 60) -> str:
+        text = re.sub(r"<[^>]+>", " ", str(value or ""))
+        text = re.sub(r"https?://\S+", " ", text)
+        text = re.sub(r"\s+", " ", text).strip().strip("-–—|:· ")
+        if len(text) > limit:
+            text = text[: max(0, limit - 1)].rstrip() + "…"
+        return text
+
+    def _is_low_quality_title(self, text: str) -> bool:
+        clean = self._clean_search_text(text, limit=160)
+        low = clean.lower()
+        if not clean or len(clean) < 6:
+            return True
+        noisy = [
+            "의견 예상치", "컨센서스", "시장종합", "네이버 블로그", "traderfeels",
+            "목표주가 -", "주가전망, 목표주가", "주가 전망, 목표주가",
+            "investing.com", "기업개요", "증권사 리포트", "관련이 아니",
+            "특정 기업 소식 없이", "기본 관점", "주요 경제뉴스",
+        ]
+        if any(x.lower() in low for x in noisy):
+            return True
+        if clean.rstrip().endswith(("-", "–", "—", "|")):
+            return True
+        return False
+
+    def _fallback_key_opinions(self, items: List[Dict], company_name: str) -> List[str]:
+        opinions: List[str] = []
+        generic = {"주가 전망과 전략이 중요", "변동성 크고 투자주의 필요", "투자주의 필요", "전략이 중요"}
+        for item in items or []:
+            if self._is_low_quality_title(item.get("title", "")) and ("블로그" in str(item.get("source", "")) or "blog" in str(item.get("url", "")).lower()):
+                continue
+            candidates = [item.get("content", ""), item.get("title", "")]
+            for raw in candidates:
+                for part in re.split(r"[\.\!\?。\n]+", str(raw or "")):
+                    line = self._clean_search_text(part, limit=38)
+                    if not line or line in generic or self._is_low_quality_title(line):
+                        continue
+                    if company_name and line == company_name:
+                        continue
+                    opinions.append(line)
+                    break
+                if opinions and opinions[-1] == line:
+                    break
+            if len(opinions) >= 3:
+                break
+        if not opinions:
+            opinions.append("실적과 수급을 지켜보는 분위기예요")
+        return opinions[:3]
+
+    def _fallback_key_issues(self, items: List[Dict], company_name: str) -> List[Dict]:
+        issues: List[Dict] = []
+        for item in items or []:
+            if self._is_low_quality_title(item.get("title", "")) and ("블로그" in str(item.get("source", "")) or "blog" in str(item.get("url", "")).lower()):
+                continue
+            title = self._clean_search_text(item.get("title", ""), limit=45)
+            if self._is_low_quality_title(title):
+                content = str(item.get("content", ""))
+                title = ""
+                for part in re.split(r"[\.\!\?。\n]+", content):
+                    candidate = self._clean_search_text(part, limit=45)
+                    if candidate and not self._is_low_quality_title(candidate):
+                        title = candidate
+                        break
+            if not title:
+                continue
+            issues.append({
+                "title": title,
+                "source": item.get("source", ""),
+                "url": item.get("url", ""),
+                "impact": item.get("impact", "MEDIUM"),
+            })
+            if len(issues) >= 5:
+                break
+        return issues
 
     # ========================================
     # 커뮤니티 요약
@@ -205,7 +282,7 @@ class ChatbotNewsCommunity:
         """대표 의견 추출 (LLM 활용)"""
         if not items or not self.genai:
             # LLM 없으면 간단한 추출
-            return [item.get("title", "")[:30] for item in items[:3]]
+            return self._fallback_key_opinions(items, company_name)
 
         # LLM으로 핵심 의견 추출
         contents = []
@@ -246,13 +323,14 @@ class ChatbotNewsCommunity:
                     continue
                 line = re.sub(r'^\d+[\.\)]\s*', '', line)
                 line = re.sub(r'^[\-\•\*]\s*', '', line).strip().strip("\"'“”‘’")
+                line = self._clean_search_text(line, limit=40)
                 generic = {"주가 전망과 전략이 중요", "변동성 크고 투자주의 필요", "투자주의 필요", "전략이 중요"}
-                if line and line not in generic and len(line) <= 40:
+                if line and line not in generic and not self._is_low_quality_title(line) and len(line) <= 40:
                     opinions.append(line)
             return opinions[:3]
         except Exception:
             # 실패 시 제목 사용
-            return [item.get("title", "")[:30] for item in items[:3]]
+            return self._fallback_key_opinions(items, company_name)
 
     def _get_realtime_expression(self) -> str:
         """실시간성 표현"""
@@ -360,15 +438,7 @@ class ChatbotNewsCommunity:
         """뉴스를 핵심 이슈로 변환"""
         if not items or not self.genai:
             # LLM 없으면 제목 그대로
-            return [
-                {
-                    "title": item.get("title", ""),
-                    "source": item.get("source", ""),
-                    "url": item.get("url", ""),
-                    "impact": item.get("impact", "MEDIUM")
-                }
-                for item in items
-            ]
+            return self._fallback_key_issues(items, company_name)
 
         # LLM으로 핵심 이슈 추출
         news_list = []
@@ -419,8 +489,14 @@ class ChatbotNewsCommunity:
             key_issues = []
             for i, item in enumerate(items):
                 summary = summaries[i] if i < len(summaries) else item.get("title", "")
+                summary = self._clean_search_text(summary, limit=45)
                 if any(bad in str(summary) for bad in ["관련이 아니", "특정 기업 소식 없이", "기본 관점", "주요 경제뉴스", "제외"]):
                     continue
+                if self._is_low_quality_title(summary):
+                    fallback_one = self._fallback_key_issues([item], company_name)
+                    if not fallback_one:
+                        continue
+                    summary = fallback_one[0]["title"]
                 key_issues.append({
                     "title": summary,
                     "source": item.get("source", ""),
@@ -431,15 +507,7 @@ class ChatbotNewsCommunity:
 
         except Exception:
             # 실패 시 제목 그대로
-            return [
-                {
-                    "title": item.get("title", ""),
-                    "source": item.get("source", ""),
-                    "url": item.get("url", ""),
-                    "impact": item.get("impact", "MEDIUM")
-                }
-                for item in items
-            ]
+            return self._fallback_key_issues(items, company_name)
 
     # ========================================
     # 카카오톡 포맷
@@ -471,7 +539,7 @@ class ChatbotNewsCommunity:
 {summary_text}"""
 
         # 2차 메시지: 대표 의견
-        opinions_text = "\n".join([f"- \"{op}\"" for op in opinions])
+        opinions_text = "\n".join([f"- \"{op}\"" for op in opinions]) or "- 아직 뚜렷한 반복 의견은 많지 않아요"
         message_2 = f"""대표적인 의견을 몇 개 보면 아래와 같아요 :)
 
 {opinions_text}

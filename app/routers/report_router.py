@@ -244,7 +244,7 @@ def chatbot_report(req: ChatbotReportRequest):
             return bot.format_stock_not_found_for_kakao()
 
         company_name = _resolve_company_name(bot, symbol, fallback="종목")
-        summary_dict = bot.get_report_summary(symbol, company_name)
+        summary_dict = bot.get_report_summary(symbol, company_name, segment=segment, profile=profile)
 
         return apply_personalization_to_kakao(bot.format_summary_for_kakao(summary_dict), segment, domain="report")
 
@@ -278,6 +278,8 @@ def chatbot_report(req: ChatbotReportRequest):
             company_name=company_name,
             section=section_key,
             raw_data=None,
+            segment=segment,
+            profile=profile,
         )
         return apply_personalization_to_kakao(bot.format_section_for_kakao(detail_dict), segment, domain="report")
 
@@ -291,7 +293,7 @@ def chatbot_report(req: ChatbotReportRequest):
             return bot.format_stock_not_found_for_kakao()
 
         company_name = _resolve_company_name(bot, symbol, fallback="종목")
-        all_sections_dict = bot.get_all_sections(symbol, company_name)
+        all_sections_dict = bot.get_all_sections(symbol, company_name, segment=segment, profile=profile)
 
         return apply_personalization_to_kakao(bot.format_all_sections_for_kakao(all_sections_dict), segment, domain="report")
 

@@ -4,6 +4,7 @@ Web_02 뉴스/커뮤니티 데이터 프로바이더
 """
 
 import os
+import re
 from typing import Dict, List, Optional
 from datetime import datetime
 from dotenv import load_dotenv
@@ -117,6 +118,38 @@ class StockNewsDataProvider:
             "fetched_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
 
+
+    def _clean_text(self, value: str, limit: int = 120) -> str:
+        text = re.sub(r"<[^>]+>", " ", str(value or ""))
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) > limit:
+            return text[: max(0, limit - 1)].rstrip() + "…"
+        return text
+
+    def _is_low_quality_url(self, url: str) -> bool:
+        u = str(url or "").lower()
+        noisy = [
+            "blog.naver.com", "m.blog.naver.com", "cafe.naver.com", "post.naver.com",
+            "youtube.com", "youtu.be", "traderfeels", "dcinside.com", "fmkorea.com",
+        ]
+        return any(x in u for x in noisy)
+
+    def _is_low_quality_title(self, title: str) -> bool:
+        t = self._clean_text(title, limit=160)
+        low = t.lower()
+        if not t or len(t) < 6:
+            return True
+        noisy = [
+            "의견 예상치", "컨센서스", "시장종합", "네이버 블로그", "traderfeels",
+            "목표주가 -", "주가전망, 목표주가", "investing.com", "기업개요",
+            "주가 전망, 목표주가", "주가전망 목표주가",
+        ]
+        if any(x.lower() in low for x in noisy):
+            return True
+        if t.rstrip().endswith(("-", "–", "—", "|")):
+            return True
+        return False
+
     def _normalize_text(self, value: str) -> str:
         import re
         return re.sub(r"[^0-9A-Za-z가-힣]", "", str(value or "")).lower()
@@ -148,6 +181,8 @@ class StockNewsDataProvider:
         for item in results:
             title = item.get("title", "")
             content = item.get("content", "")
+            if self._is_low_quality_url(item.get("url", "")) or self._is_low_quality_title(title):
+                continue
             text = f"{title} {content}".lower()
 
             if not self._is_company_relevant(item, company_name=company_name, symbol=symbol):
@@ -237,7 +272,11 @@ class StockNewsDataProvider:
         if "error" in search_result:
             return self._error_response(search_result["error"])
 
-        results = search_result.get("results", [])
+        results = [
+            item for item in search_result.get("results", [])
+            if not self._is_low_quality_url(item.get("url", ""))
+            and not self._is_low_quality_title(item.get("title", ""))
+        ]
 
         # 페이징
         start_idx = (page - 1) * limit
