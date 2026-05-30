@@ -31,11 +31,11 @@ class ChatbotGlossary:
     - format_not_found_for_kakao(): 검색 실패 카카오 응답
     """
 
-    # Lambda가 용어 설명을 2개 설명 말풍선 + 1개 안내 말풍선으로 분할하므로
-    # EC2에서는 설명 품질을 위해 기존보다 넉넉하게 생성한다.
-    # 단, 최종 카카오 전송 직전 Lambda에서 문단 단위로 다시 안전 분할한다.
-    MAX_PROMPT_RESPONSE_CHARS = 1100
-    MAX_FINAL_RESPONSE_CHARS = 1600
+    # 카카오 simpleText 최대 글자 수를 고려한 안전 길이
+    # 보수적으로 700자 내외를 목표로 생성하고
+    # 마지막 후처리에서는 900자 기준으로 한 번 더 잘라줍니다.
+    MAX_PROMPT_RESPONSE_CHARS = 700
+    MAX_FINAL_RESPONSE_CHARS = 900
 
     # 기획안 카테고리별 대표 용어
     CATEGORIES = {
@@ -316,10 +316,9 @@ class ChatbotGlossary:
 - 새로운 정의를 만들지 마세요
 - 투자 판단이나 의견을 제시하지 마세요
 - 쉽고 친근한 말투를 사용하세요
-- 각 항목은 1~2문장으로 작성하되, 문장이 중간에 끊기지 않게 완결하세요
-- 헷갈리기 쉬운 용어는 최대 2개만 쓰고 각 용어 설명은 1문장으로 작성하세요
+- 각 항목은 1~2문장으로 간결하게 작성하세요
 - 전체 답변은 {self.MAX_PROMPT_RESPONSE_CHARS}자 이내로 작성하세요
-- 카카오톡에서는 Lambda가 말풍선을 나누므로 필요한 설명은 생략하지 마세요""" + build_prompt_suffix(segment, domain="glossary", profile=profile)
+- 카카오톡 메시지 길이 제한을 고려하여 불필요하게 길게 쓰지 마세요""" + build_prompt_suffix(segment, domain="glossary", profile=profile)
 
         try:
             model = self.genai.GenerativeModel(
@@ -329,7 +328,7 @@ class ChatbotGlossary:
                     "검증된 용어 데이터를 바탕으로 초보자에게 쉽게 설명합니다. "
                     "새로운 정의를 만들거나 투자 판단을 제시하지 않습니다. "
                     f"전체 답변은 반드시 {self.MAX_PROMPT_RESPONSE_CHARS}자 이내로 작성합니다. "
-                    "각 문장은 완결하고, 출력 형식은 ➊정의 ➋언제 쓰이나요 ➌예시 ➍주의할 점 ➎헷갈리기 쉬운 용어 형식을 유지합니다."
+                    "출력 형식은 ➊정의 ➋언제 쓰이나요 ➌예시 ➍주의할 점 ➎헷갈리기 쉬운 용어 형식을 유지합니다."
                 )
             )
 
@@ -337,7 +336,7 @@ class ChatbotGlossary:
                 prompt,
                 generation_config={
                     "temperature": 0.2,
-                    "max_output_tokens": 768,
+                    "max_output_tokens": 512,
                 }
             )
 
@@ -419,7 +418,7 @@ class ChatbotGlossary:
             for rt in related_terms[:2]:
                 rt_entry = self.glossary.lookup(rt)
                 if rt_entry:
-                    rt_desc = self._short_related_description(rt_entry.get("description", ""), limit=90)
+                    rt_desc = rt_entry.get("description", "")[:50]
                     text += f"- {rt} : {rt_desc}\n"
                 else:
                     text += f"- {rt}\n"
