@@ -9,6 +9,7 @@ glossary.json 기반 용어 조회 및 유사 검색
 
 import json
 import os
+import re
 from typing import Dict, List, Optional
 
 
@@ -22,6 +23,23 @@ class GlossaryAPI:
     - get_related_terms(): 연관 용어 조회
     - get_all_terms(): 전체 용어 목록
     """
+
+    ALIASES = {
+        "etw": "ELW",      # 사용자가 ETW로 잘못 입력하는 경우 ELW로 보정
+        "elw": "ELW",
+        "etf": "ETF",
+        "레버리지 etf": "레버리지ETF",
+        "레버리지etf": "레버리지ETF",
+    }
+
+    @staticmethod
+    def _norm(value: str) -> str:
+        return re.sub(r"[^0-9A-Za-z가-힣]", "", str(value or "")).lower()
+
+    @classmethod
+    def _alias(cls, value: str) -> str:
+        raw = str(value or "").strip()
+        return cls.ALIASES.get(raw.lower()) or cls.ALIASES.get(cls._norm(raw)) or raw
 
     def __init__(self, glossary_path: str = None):
         """Initialize"""
@@ -62,23 +80,22 @@ class GlossaryAPI:
             }
             또는 None (없는 경우)
         """
-        # 정확 매칭
-        if term in self._data:
-            result = self._data[term].copy()
-            result["term"] = term
-            return result
+        raw_term = str(term or "").strip()
+        canonical = self._alias(raw_term)
 
-        # 대소문자 무시 매칭
-        term_upper = term.upper()
-        for key, value in self._data.items():
-            if key.upper() == term_upper:
-                result = value.copy()
-                result["term"] = key
+        # 정확 매칭 + alias 매칭
+        for probe in (raw_term, canonical):
+            if probe in self._data:
+                result = self._data[probe].copy()
+                result["term"] = probe
                 return result
 
-        # full_name 매칭
+        # 대소문자/공백/특수문자 무시 매칭
+        target_norms = {self._norm(raw_term), self._norm(canonical)}
+        target_uppers = {raw_term.upper(), canonical.upper()}
         for key, value in self._data.items():
-            if value.get("full_name", "") == term:
+            names = [key, value.get("full_name", ""), value.get("english", "")]
+            if key.upper() in target_uppers or any(self._norm(name) in target_norms for name in names if name):
                 result = value.copy()
                 result["term"] = key
                 return result
@@ -97,7 +114,9 @@ class GlossaryAPI:
             [{"term": "PER", "full_name": "주가수익비율", "category": "재무비율"}, ...]
         """
         results = []
+        query = self._alias(query)
         query_lower = query.lower()
+        query_norm = self._norm(query)
 
         for key, value in self._data.items():
             score = 0
@@ -109,15 +128,18 @@ class GlossaryAPI:
             full_lower = full_name.lower()
             eng_lower = english.lower()
             desc_lower = description.lower()
+            key_norm = self._norm(key)
+            full_norm = self._norm(full_name)
+            eng_norm = self._norm(english)
 
             # 키 매칭 (양방향: 검색어가 키에 포함 OR 키가 검색어에 포함)
-            if query_lower in key_lower or key_lower in query_lower:
+            if query_lower in key_lower or key_lower in query_lower or (query_norm and (query_norm in key_norm or key_norm in query_norm)):
                 score += 10
             # full_name 매칭 (양방향)
-            if query_lower in full_lower or full_lower in query_lower:
+            if query_lower in full_lower or full_lower in query_lower or (query_norm and (query_norm in full_norm or full_norm in query_norm)):
                 score += 8
             # english 매칭 (양방향)
-            if query_lower in eng_lower or eng_lower in query_lower:
+            if query_lower in eng_lower or eng_lower in query_lower or (query_norm and (query_norm in eng_norm or eng_norm in query_norm)):
                 score += 6
             # description 매칭 (단방향: 검색어가 설명에 포함)
             if query_lower in desc_lower:

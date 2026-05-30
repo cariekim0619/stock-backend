@@ -11,6 +11,7 @@ Chatbot_04 거래내역 / 요약 리포트 API
 """
 
 import os
+import re
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from dotenv import load_dotenv
@@ -82,6 +83,33 @@ class ChatbotTransactionReport:
     # 메인 API: 거래내역 리포트
     # ========================================
 
+    def _is_kis_token_rate_limit(self, reason: str) -> bool:
+        raw = str(reason or "")
+        low = raw.lower()
+        return "EGW00133" in raw or "token rate limited" in low or "token cooldown" in low
+
+    def _retry_after_seconds(self, reason: str, default: int = 70) -> int:
+        raw = str(reason or "")
+        for pattern in (r"retry\s*after\s*(\d+)\s*s", r"(\d+)\s*초", r"(\d+)\s*s"):
+            m = re.search(pattern, raw, flags=re.I)
+            if m:
+                try:
+                    return max(1, int(m.group(1)))
+                except Exception:
+                    pass
+        return int(default)
+
+    def _token_rate_limit_response(self, reason: str, *, segment: str, period: str, symbol: str, company_name: str) -> Dict:
+        return {
+            "token_rate_limited": True,
+            "retry_after": self._retry_after_seconds(reason),
+            "symbol": symbol,
+            "company_name": company_name or symbol or "종목",
+            "generated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "segment": segment,
+            "period": period,
+        }
+
     def get_transaction_report(self, symbol: str = "", company_name: str = "전체 거래내역", period: str = "1m", segment: str = "risk-neutral", profile: Optional[Dict[str, Any]] = None) -> Dict:
         """
         거래내역 + 요약 리포트 (챗봇 말풍선 1+2 데이터)
@@ -120,6 +148,8 @@ class ChatbotTransactionReport:
             transactions = self._get_hantu().get_transaction_history(period=period)
         except Exception as e:
             print(f"[ERROR] get_transaction_report: transaction history failed: {e}")
+            if self._is_kis_token_rate_limit(str(e)):
+                return self._token_rate_limit_response(str(e), segment=segment, period=period, symbol=symbol, company_name=company_name)
             return self._error_response(str(e), segment=segment, period=period, symbol=symbol, company_name=company_name)
 
         # 2단계: 종목 필터링. symbol이 비어 있으면 기간 내 전체 거래내역을 사용한다.
@@ -427,6 +457,9 @@ class ChatbotTransactionReport:
         - 말풍선 3: 웹 상세 리포트 버튼 (basicCard)
         - 퀵 버튼: 다른 종목 보기 / 종료
         """
+        if report.get("token_rate_limited"):
+            return self._kakao_token_rate_limit_response(report.get("retry_after", 70))
+
         if report.get("error"):
             return self._kakao_error_response(report.get("error") or "거래내역 조회 중 오류가 발생했어요.")
 
@@ -468,10 +501,12 @@ class ChatbotTransactionReport:
             message_1 = f"선택한 기간 안에서 거래내역을 확인했어요.\n\n이 거래내역을 기준으로\n요약 리포트를 작성해드릴게요 !\n잠시만 기다려주세요!\n\n{message_1}"
 
         # 말풍선 2: 거래 패턴 해설 (RAG)
-        message_2 = "📑 요약 리포트\n\n"
+        message_2 = "📑 거래 리포트\n\n"
         message_2 += f"➊ 거래 흐름\n- {rag.get('flow', '분석 중이에요.')}\n\n"
         message_2 += f"➋ 매매 패턴\n- {rag.get('pattern', '분석 중이에요.')}\n\n"
         message_2 += f"➌ 체크 포인트\n- {rag.get('checkpoint', '분석 중이에요.')}"
+        if not is_all_transactions:
+            message_2 += "\n\n다른 종목의 거래내역도 궁금하면 종목명을 계속 입력해 주세요."
 
         return {
             "version": "2.0",
@@ -549,7 +584,11 @@ class ChatbotTransactionReport:
             "template": {
                 "outputs": [{
                     "simpleText": {
-                        "text": (f"⚠️ {period_label} 동안\n거래내역이 없어요.\n\n기간을 더 길게 선택하거나 종목별 조회를 이용해 주세요." if not str(symbol or "").strip() else f"⚠️ {period_label} 동안\n{company_name}의 거래내역이 없어요.\n\n기간을 더 길게 선택하거나 다른 종목을 입력해주세요.")
+                        "text": (
+                            f"⚠️ {period_label} 동안\n거래내역이 없어요.\n\n기간을 변경하거나 종목명을 입력해 주세요."
+                            if not str(symbol or "").strip()
+                            else f"⚠️ {period_label} 동안\n{company_name}의 거래내역이 없어요.\n\n다른 종목명을 입력해 주세요."
+                        )
                     }
                 }],
                 "quickReplies": [
@@ -574,14 +613,38 @@ class ChatbotTransactionReport:
             "period": period,
         }
 
-    def _kakao_error_response(self, reason: str) -> Dict:
-        """카카오톡 에러 응답"""
+    def _kakao_token_rate_limit_response(self, retry_after: int = 70) -> Dict:
+        """KIS 토큰 발급 제한 사용자 안내"""
+        try:
+            retry_after = max(1, int(retry_after))
+        except Exception:
+            retry_after = 70
         return {
             "version": "2.0",
             "template": {
                 "outputs": [{
                     "simpleText": {
-                        "text": f"❌ {reason}\n잠시 후 다시 시도해주세요."
+                        "text": (
+                            "한국투자증권 Open API 토큰 발급 요청이 잠시 제한됐어요.\n\n"
+                            "토큰은 짧은 시간 안에 반복 발급하면 계정 보호를 위해 제한될 수 있어요.\n"
+                            f"약 {retry_after}초 뒤에 다시 이용해 주세요.\n\n"
+                            "계정 보호를 위해 지금은 추가 토큰 발급을 시도하지 않을게요."
+                        )
+                    }
+                }]
+            },
+        }
+
+    def _kakao_error_response(self, reason: str) -> Dict:
+        """카카오톡 에러 응답"""
+        if self._is_kis_token_rate_limit(str(reason)):
+            return self._kakao_token_rate_limit_response(self._retry_after_seconds(str(reason)))
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [{
+                    "simpleText": {
+                        "text": f"거래내역 조회 중 문제가 발생했어요.\n잠시 후 다시 시도해주세요."
                     }
                 }]
             },

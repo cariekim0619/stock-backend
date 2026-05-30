@@ -5,6 +5,7 @@ Web_02 뉴스/커뮤니티 데이터 프로바이더
 
 import os
 import re
+import html
 from typing import Dict, List, Optional
 from datetime import datetime
 from dotenv import load_dotenv
@@ -106,8 +107,8 @@ class StockNewsDataProvider:
             "items": [
                 {
                     "id": f"news_{i}",
-                    "title": item.get("title", ""),
-                    "content": item.get("content", "")[:150] + "...",
+                    "title": self._clean_text(item.get("title", ""), limit=90),
+                    "content": self._clean_text(item.get("content", ""), limit=150) + "...",
                     "url": item.get("url", ""),
                     "source": self._extract_source(item.get("url", "")),
                     "published_at": search_result.get("searched_at", ""),
@@ -120,10 +121,20 @@ class StockNewsDataProvider:
 
 
     def _clean_text(self, value: str, limit: int = 120) -> str:
-        text = re.sub(r"<[^>]+>", " ", str(value or ""))
-        text = re.sub(r"\s+", " ", text).strip()
+        text = html.unescape(str(value or ""))
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"https?://\S+", " ", text)
+        text = re.sub(r"댓글\s*\d+", " ", text)
+        # 검색 결과 제목 뒤에 붙는 출처/섹션 꼬리를 제거한다.
+        text = re.split(r"\s+[•|]\s+", text)[0]
+        text = re.sub(r"\s*[-–—]\s*(한국경제|한국경제TV|매일경제|서울경제|이데일리|네이버뉴스|뉴스)\s*$", "", text)
+        text = re.sub(r"\s+", " ", text).strip().strip("-–—|:· \"'“”‘’")
+        if text.count('"') % 2 == 1:
+            text = text.replace('"', '')
+        if text.count('“') != text.count('”'):
+            text = text.replace('“', '').replace('”', '')
         if len(text) > limit:
-            return text[: max(0, limit - 1)].rstrip() + "…"
+            return text[: max(0, limit - 1)].rstrip(" -–—|:·") + "…"
         return text
 
     def _is_low_quality_url(self, url: str) -> bool:
@@ -142,7 +153,9 @@ class StockNewsDataProvider:
         noisy = [
             "의견 예상치", "컨센서스", "시장종합", "네이버 블로그", "traderfeels",
             "목표주가 -", "주가전망, 목표주가", "investing.com", "기업개요",
-            "주가 전망, 목표주가", "주가전망 목표주가",
+            "주가 전망, 목표주가", "주가전망 목표주가", "최신뉴스 섹션",
+            "페이지 - 한국경제", "섹션 |", "증권경제 최신뉴스", "조재길",
+            "주가 전망과 대응 방법", "관련기사", "많이 본 뉴스", "5 페이지",
         ]
         if any(x.lower() in low for x in noisy):
             return True
@@ -276,6 +289,7 @@ class StockNewsDataProvider:
             item for item in search_result.get("results", [])
             if not self._is_low_quality_url(item.get("url", ""))
             and not self._is_low_quality_title(item.get("title", ""))
+            and self._is_company_relevant(item, company_name=company_name, symbol=symbol)
         ]
 
         # 페이징
@@ -301,8 +315,8 @@ class StockNewsDataProvider:
             "items": [
                 {
                     "id": f"comm_{i}",
-                    "title": item.get("title", ""),
-                    "content": item.get("content", "")[:200] + "...",
+                    "title": self._clean_text(item.get("title", ""), limit=90),
+                    "content": self._clean_text(item.get("content", ""), limit=200) + "...",
                     "url": item.get("url", ""),
                     "source": self._extract_source(item.get("url", "")),
                     "sentiment": self._analyze_sentiment(item.get("content", "")),

@@ -11,6 +11,7 @@ Chatbot_05 뉴스/커뮤니티 API
 
 import os
 import re
+import html
 from typing import Dict, List, Optional
 from datetime import datetime
 from dotenv import load_dotenv
@@ -50,11 +51,23 @@ class ChatbotNewsCommunity:
 
 
     def _clean_search_text(self, value: str, limit: int = 60) -> str:
-        text = re.sub(r"<[^>]+>", " ", str(value or ""))
+        text = html.unescape(str(value or ""))
+        text = re.sub(r"<[^>]+>", " ", text)
         text = re.sub(r"https?://\S+", " ", text)
-        text = re.sub(r"\s+", " ", text).strip().strip("-–—|:· ")
+        text = re.sub(r"댓글\s*\d+", " ", text)
+        # Tavily가 제목 뒤에 붙이는 섹션/출처 꼬리 제거
+        text = re.split(r"\s+[•|]\s+", text)[0]
+        text = re.sub(r"\s*[-–—]\s*(한국경제|한국경제TV|매일경제|서울경제|이데일리|네이버뉴스|뉴스)\s*$", "", text)
+        text = re.sub(r"^[\-•*\d\.\)\s]+", "", text)
+        text = re.sub(r"\s+", " ", text).strip().strip("-–—|:· \"'“”‘’")
+        # 열린 따옴표/말줄임만 남은 문장을 정리
+        text = text.strip('\"“”‘’')
+        if text.count('"') % 2 == 1:
+            text = text.replace('"', '')
+        if text.count('“') != text.count('”'):
+            text = text.replace('“', '').replace('”', '')
         if len(text) > limit:
-            text = text[: max(0, limit - 1)].rstrip() + "…"
+            text = text[: max(0, limit - 1)].rstrip(" -–—|:·\"'“”‘’") + "…"
         return text
 
     def _is_low_quality_title(self, text: str) -> bool:
@@ -67,6 +80,8 @@ class ChatbotNewsCommunity:
             "목표주가 -", "주가전망, 목표주가", "주가 전망, 목표주가",
             "investing.com", "기업개요", "증권사 리포트", "관련이 아니",
             "특정 기업 소식 없이", "기본 관점", "주요 경제뉴스",
+            "최신뉴스 섹션", "페이지 - 한국경제", "섹션 |", "증권경제 최신뉴스",
+            "조재길", "주가 전망과 대응 방법", "관련기사", "많이 본 뉴스", "5 페이지",
         ]
         if any(x.lower() in low for x in noisy):
             return True
@@ -503,7 +518,20 @@ class ChatbotNewsCommunity:
                     "url": item.get("url", ""),
                     "impact": item.get("impact", "MEDIUM")
                 })
-            return key_issues
+            cleaned: List[Dict] = []
+            seen_titles = set()
+            for issue in key_issues:
+                title = self._clean_search_text(issue.get("title", ""), limit=50)
+                if not title or self._is_low_quality_title(title):
+                    continue
+                if title in seen_titles:
+                    continue
+                issue["title"] = title
+                cleaned.append(issue)
+                seen_titles.add(title)
+                if len(cleaned) >= 5:
+                    break
+            return cleaned or self._fallback_key_issues(items, company_name)
 
         except Exception:
             # 실패 시 제목 그대로
@@ -539,7 +567,17 @@ class ChatbotNewsCommunity:
 {summary_text}"""
 
         # 2차 메시지: 대표 의견
-        opinions_text = "\n".join([f"- \"{op}\"" for op in opinions]) or "- 아직 뚜렷한 반복 의견은 많지 않아요"
+        cleaned_opinions = []
+        seen_ops = set()
+        for op in opinions:
+            clean_op = self._clean_search_text(op, limit=42)
+            if not clean_op or self._is_low_quality_title(clean_op):
+                continue
+            if clean_op in seen_ops:
+                continue
+            cleaned_opinions.append(clean_op)
+            seen_ops.add(clean_op)
+        opinions_text = "\n".join([f"- {op}" for op in cleaned_opinions[:3]]) or "- 아직 뚜렷한 반복 의견은 많지 않아요"
         message_2 = f"""대표적인 의견을 몇 개 보면 아래와 같아요 :)
 
 {opinions_text}
@@ -608,7 +646,19 @@ class ChatbotNewsCommunity:
         if not key_issues:
             message = f"최근 {company_name}와 직접 관련된 주요 뉴스를 찾지 못했어요.\n\n잠시 후 다시 확인해 주세요."
         else:
-            issues_text = "\n".join([f"• {issue['title']}" for issue in key_issues])
+            cleaned_issues = []
+            seen_issue_titles = set()
+            for issue in key_issues:
+                title = self._clean_search_text(issue.get("title", ""), limit=50)
+                if not title or self._is_low_quality_title(title):
+                    continue
+                if title in seen_issue_titles:
+                    continue
+                cleaned_issues.append(title)
+                seen_issue_titles.add(title)
+            issues_text = "\n".join([f"• {title}" for title in cleaned_issues[:5]])
+            if not issues_text:
+                issues_text = "• 직접 관련된 주요 뉴스가 아직 많지 않아요"
             message = f"""{timestamp} {company_name} 관련
 주요 뉴스도 정리해봤어요.
 
