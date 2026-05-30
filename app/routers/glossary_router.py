@@ -18,6 +18,8 @@ class GlossaryRequest(BaseModel):
     category: Optional[str] = None
     segment: Optional[str] = "risk-neutral"
     profile: Optional[Dict[str, Any]] = None
+    survey_profile: Optional[Dict[str, Any]] = None
+    personalization: Optional[Dict[str, Any]] = None
 
 
 @router.post("")
@@ -43,7 +45,11 @@ def handle_glossary(req: GlossaryRequest):
             if not req.user_input:
                 raise HTTPException(status_code=400, detail="user_input이 필요합니다.")
 
-            result = chatbot.search_and_explain(req.user_input)
+            result = chatbot.search_and_explain(
+                req.user_input,
+                segment=req.segment or "risk-neutral",
+                profile=req.profile or req.survey_profile,
+            )
 
             if result["status"] == "found":
                 return chatbot.format_explanation_for_kakao(result)

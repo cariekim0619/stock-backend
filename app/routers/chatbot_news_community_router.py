@@ -14,6 +14,8 @@ class BriefingRequest(BaseModel):
     user_name: str = "사용자"
     segment: Optional[str] = "risk-neutral"
     profile: Optional[Dict[str, Any]] = None
+    survey_profile: Optional[Dict[str, Any]] = None
+    personalization: Optional[Dict[str, Any]] = None
 
 
 router = APIRouter(
@@ -54,7 +56,7 @@ def chatbot_community(req: BriefingRequest):
         symbol=symbol,
         company_name=company_name,
         segment=segment,
-        profile=req.profile,
+        profile=req.profile or req.survey_profile,
     )
     return chatbot.format_community_for_kakao(summary, user_name=req.user_name)
 
@@ -73,6 +75,6 @@ def chatbot_news(req: BriefingRequest):
         symbol=symbol,
         company_name=company_name,
         segment=segment,
-        profile=req.profile,
+        profile=req.profile or req.survey_profile,
     )
     return chatbot.format_news_for_kakao(summary)

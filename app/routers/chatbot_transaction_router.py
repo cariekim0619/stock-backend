@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -15,7 +15,9 @@ class TransactionReportRequest(BaseModel):
     is_account_linked: bool = False
     period: str = "1m"
     segment: str = "risk-neutral"
-    profile: Optional[dict] = None
+    profile: Optional[Dict[str, Any]] = None
+    survey_profile: Optional[Dict[str, Any]] = None
+    personalization: Optional[Dict[str, Any]] = None
 
 
 @router.post("/report")
@@ -29,7 +31,7 @@ async def get_transaction_report(req: TransactionReportRequest):
             company_name=req.company_name or req.symbol or "전체 거래내역",
             period=req.period,
             segment=req.segment,
-            profile=req.profile,
+            profile=req.profile or req.survey_profile,
         )
         return service.format_report_for_kakao(report)
     except Exception as e:

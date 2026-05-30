@@ -12,6 +12,7 @@ Chatbot_03 주식 용어 사전 API
 import os
 import re
 from typing import Dict, List, Optional
+from app.services.segment_personalization import build_prompt_suffix
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -80,7 +81,7 @@ class ChatbotGlossary:
     # 메인 API
     # ========================================
 
-    def search_and_explain(self, user_input: str) -> Dict:
+    def search_and_explain(self, user_input: str, segment: str = "risk-neutral", profile: Optional[Dict] = None) -> Dict:
         """
         용어 검색 + 설명 생성 (메인 API)
 
@@ -105,7 +106,7 @@ class ChatbotGlossary:
         # 1. 정확 검색
         entry = self.glossary.lookup(query)
         if entry:
-            explanation = self._generate_explanation(entry)
+            explanation = self._generate_explanation(entry, segment=segment, profile=profile)
             return {
                 "status": "found",
                 "term": entry["term"],
@@ -118,7 +119,7 @@ class ChatbotGlossary:
         if extracted:
             entry = self.glossary.lookup(extracted)
             if entry:
-                explanation = self._generate_explanation(entry)
+                explanation = self._generate_explanation(entry, segment=segment, profile=profile)
                 return {
                     "status": "found",
                     "term": entry["term"],
@@ -137,7 +138,7 @@ class ChatbotGlossary:
             ):
                 top_entry = self.glossary.lookup(top["term"])
                 if top_entry:
-                    explanation = self._generate_explanation(top_entry)
+                    explanation = self._generate_explanation(top_entry, segment=segment, profile=profile)
                     return {
                         "status": "found",
                         "term": top_entry["term"],
@@ -208,7 +209,7 @@ class ChatbotGlossary:
     # RAG: 용어 설명 생성
     # ========================================
 
-    def _generate_explanation(self, entry: Dict) -> str:
+    def _generate_explanation(self, entry: Dict, segment: str = "risk-neutral", profile: Optional[Dict] = None) -> str:
         """
         KB 데이터 → 기획안 고정 포맷으로 변환 (RAG)
 
@@ -231,9 +232,13 @@ class ChatbotGlossary:
         - A : ...
         - B : ...
         """
+        if self.genai:
+            llm_text = self._rag_explanation(entry, segment=segment, profile=profile)
+            if llm_text:
+                return llm_text
         return self._fallback_explanation(entry)
 
-    def _rag_explanation(self, entry: Dict) -> Optional[str]:
+    def _rag_explanation(self, entry: Dict, segment: str = "risk-neutral", profile: Optional[Dict] = None) -> Optional[str]:
         """LLM 기반 RAG 설명 생성"""
         term = entry.get("term", "")
         full_name = entry.get("full_name", "")
@@ -307,7 +312,7 @@ class ChatbotGlossary:
 - 쉽고 친근한 말투를 사용하세요
 - 각 항목은 1~2문장으로 간결하게 작성하세요
 - 전체 답변은 {self.MAX_PROMPT_RESPONSE_CHARS}자 이내로 작성하세요
-- 카카오톡 메시지 길이 제한을 고려하여 불필요하게 길게 쓰지 마세요"""
+- 카카오톡 메시지 길이 제한을 고려하여 불필요하게 길게 쓰지 마세요""" + build_prompt_suffix(segment, domain="glossary", profile=profile)
 
         try:
             model = self.genai.GenerativeModel(

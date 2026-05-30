@@ -33,6 +33,8 @@ class ReportRequest(BaseModel):
     ticker: str
     segment: Optional[str] = "risk-neutral"
     profile: Optional[Dict[str, Any]] = None
+    survey_profile: Optional[Dict[str, Any]] = None
+    personalization: Optional[Dict[str, Any]] = None
 
 
 @router.post("/report")
@@ -42,7 +44,8 @@ def get_report(request: ReportRequest):
         raise HTTPException(status_code=400, detail="ticker is required")
 
     segment = normalize_segment(request.segment)
-    result = generate_report(ticker, segment=segment, profile=request.profile)
+    profile = request.profile or request.survey_profile
+    result = generate_report(ticker, segment=segment, profile=profile)
 
     if not isinstance(result, dict) or "version" not in result or "template" not in result:
         raise HTTPException(status_code=500, detail="invalid kakao skill format")
@@ -64,6 +67,8 @@ class ChatbotReportRequest(BaseModel):
     stocks: Optional[List[str]] = None
     segment: Optional[str] = "risk-neutral"
     profile: Optional[Dict[str, Any]] = None
+    survey_profile: Optional[Dict[str, Any]] = None
+    personalization: Optional[Dict[str, Any]] = None
 
 
 # ---------------------------
@@ -182,6 +187,7 @@ def chatbot_report(req: ChatbotReportRequest):
     list_type = (req.list_type or "").strip()
     stocks = req.stocks or []
     segment = normalize_segment(req.segment)
+    profile = req.profile or req.survey_profile
 
     bot = ChatbotStockReport()
 

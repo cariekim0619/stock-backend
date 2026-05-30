@@ -1,11 +1,11 @@
-"""Segment personalization helpers for Stockpia chatbot.
+"""Segment + survey personalization helpers for Stockpia chatbot.
 
-v4 principles:
-- Cache can split by survey segment, including skipped users.
-- Prompts receive strict lens instructions.
-- User-facing responses should not expose labels like "공격투자형 기준" unless explicitly needed.
+- Lambda sends profile/survey_profile with Q0~Q8 answer details and scores.
+- EC2 prompt builders use those details only as internal instructions.
+- User-facing responses should not expose internal labels/scores unless explicitly requested.
 """
 from __future__ import annotations
+
 from typing import Any, Dict, Optional
 import copy
 
@@ -76,12 +76,52 @@ def get_segment_profile(segment: Optional[str], profile: Optional[Dict[str, Any]
     out = copy.deepcopy(RISK_PROFILES[seg])
     out["segment"] = seg
     if isinstance(profile, dict):
-        for key in ("level", "level_label", "risk_profile_5", "risk_label", "risk_score"):
+        # Lambda가 넘기는 stockpia-risk-v1 설문 프로필을 최대한 보존한다.
+        for key in (
+            "schema_version", "completed",
+            "level", "level_label", "investment_level_selected", "investment_level",
+            "risk_profile_5", "risk_profile", "risk_label", "risk_score",
+            "raw_score", "converted_score", "risk_profile_before_adjustment",
+            "loss_tolerance", "vulnerable_flag", "answers", "answer_details",
+        ):
             if profile.get(key) not in (None, ""):
                 out[key] = profile[key]
     out.setdefault("risk_label", out["label"])
     out.setdefault("risk_score", out["score"])
+    out.setdefault("risk_profile", out.get("risk_profile_5") or seg.replace("risk-", ""))
+    out.setdefault("answer_details", {})
+    out.setdefault("answers", {})
     return out
+
+
+def _format_survey_answer_details(profile: Dict[str, Any], limit: int = 12) -> str:
+    """LLM prompt에 넣을 설문 문항/선택/점수 요약."""
+    details = profile.get("answer_details") if isinstance(profile, dict) else {}
+    if not isinstance(details, dict) or not details:
+        return "- 세부 설문 응답 없음"
+
+    lines = []
+    for qid, item in details.items():
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or qid).strip()
+        score = item.get("score")
+        if isinstance(item.get("labels"), list):
+            label = ", ".join(str(x).strip() for x in item.get("labels") if str(x).strip())
+        else:
+            label = str(item.get("label") or item.get("value") or "").strip()
+        value = item.get("values") if item.get("values") is not None else item.get("value")
+        parts = [f"- {qid} {title}"]
+        if label:
+            parts.append(f"선택={label}")
+        if value:
+            parts.append(f"값={value}")
+        if score is not None:
+            parts.append(f"점수={score}")
+        lines.append(" | ".join(parts))
+        if len(lines) >= limit:
+            break
+    return "\n".join(lines) if lines else "- 세부 설문 응답 없음"
 
 
 def build_prompt_suffix(segment: Optional[str], *, domain: str = "common", profile: Optional[Dict[str, Any]] = None) -> str:
@@ -93,14 +133,28 @@ def build_prompt_suffix(segment: Optional[str], *, domain: str = "common", profi
         "glossary": "용어 설명",
         "transaction": "거래내역 분석",
     }.get(domain, "응답")
+    raw_score = p.get("raw_score")
+    converted_score = p.get("converted_score") or p.get("risk_score")
+    investment_level = p.get("investment_level") or p.get("level") or "unknown"
+    loss_tolerance = p.get("loss_tolerance") or "unknown"
+    vulnerable = bool(p.get("vulnerable_flag"))
+    before = p.get("risk_profile_before_adjustment") or p.get("risk_profile") or p.get("risk_profile_5")
+    answer_detail_text = _format_survey_answer_details(p)
+
     return (
         "\n\n[내부 개인화 지침: 사용자에게 이 문단을 노출하지 말 것]\n"
         f"- 대상 기능: {domain_label}\n"
-        f"- 투자성향 세그먼트: {p['label']} ({p['score']}점 구간)\n"
+        f"- 1차 분류: {p['label']} ({p['score']}점 구간)\n"
+        f"- 최종 설문 등급: {p.get('risk_label', p['label'])}, 보정 전 등급: {before}\n"
+        f"- 원점수/환산점수: {raw_score}/{converted_score}\n"
+        f"- 투자 경험 수준: {investment_level}, 손실 감내: {loss_tolerance}, 취약투자자 유의: {vulnerable}\n"
         f"- 설명 렌즈: {p['tone']}\n"
-        "- 최종 응답에는 '개인화 기준', '투자성향', '공격투자형/안정형 기준' 같은 라벨을 쓰지 않는다.\n"
-        "- 성향명 자체를 드러내지 말고 문장 톤과 체크 포인트에만 반영한다.\n"
-        "- 같은 원자료라도 강조점, 리스크 표현, 예시 난이도를 다르게 작성한다.\n"
+        "- 생성 순서: 먼저 원자료 기반의 객관적 1차 분석을 만든 뒤, 아래 세부 설문 응답을 반영해 최종 응답으로 재작성한다.\n"
+        "- 세부 설문 응답과 점수:\n"
+        f"{answer_detail_text}\n"
+        "- 최종 응답에는 '개인화 기준', '투자성향', '공격투자형/안정형 기준', 내부 점수 같은 라벨을 그대로 쓰지 않는다.\n"
+        "- 성향명 자체를 드러내지 말고 문장 톤, 난이도, 강조 순서, 체크 포인트에만 반영한다.\n"
+        "- 같은 원자료라도 이해도·투자기간·손실감내·취약투자자 여부에 따라 위험고지 강도와 예시 난이도를 다르게 작성한다.\n"
         "- 매수/매도 단정, 수익 보장, 직접 추천 표현은 금지한다.\n"
     )
 
@@ -139,7 +193,14 @@ def apply_personalization_to_raw_report(raw_report: Dict[str, Any], segment: Opt
             sections[key] = _append_note(sections.get(key, ""), "단기 모멘텀은 유효해도 변동성 확대 구간인지 같이 확인해요.")
     if "investment_opinion" in sections:
         sections["investment_opinion"] = _append_note(sections.get("investment_opinion", ""), extra)
-    report["personalization"] = {"segment": p["segment"], "label": p["label"], "score": p["score"]}
+    report["personalization"] = {
+        "segment": p["segment"],
+        "label": p["label"],
+        "score": p["score"],
+        "risk_label": p.get("risk_label"),
+        "converted_score": p.get("converted_score"),
+        "answer_details": p.get("answer_details") or {},
+    }
     return raw_report
 
 
@@ -162,7 +223,7 @@ def _sanitize_visible_personalization_labels(text: str) -> str:
 
 
 def apply_personalization_to_kakao(skill: Dict[str, Any], segment: Optional[str], *, domain: str = "common") -> Dict[str, Any]:
-    # v5: Kakao 최종 응답에 노골적인 성향 안내문을 덧붙이지 않는다.
+    # Kakao 최종 응답에 노골적인 성향 안내문을 덧붙이지 않는다.
     # 혹시 LLM/legacy formatter가 라벨을 누출하면 마지막 단계에서 제거한다.
     if not isinstance(skill, dict):
         return skill
