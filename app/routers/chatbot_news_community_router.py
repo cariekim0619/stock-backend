@@ -18,17 +18,6 @@ class BriefingRequest(BaseModel):
     personalization: Optional[Dict[str, Any]] = None
 
 
-
-
-def _safe_error_kakao(message: str = "지금은 요약 생성이 잠시 불안정해요. 잠시 후 다시 시도해 주세요."):
-    return {
-        "version": "2.0",
-        "template": {
-            "outputs": [{"simpleText": {"text": message}}],
-            "quickReplies": [{"action": "message", "label": "메인으로", "messageText": "메인으로"}],
-        },
-    }
-
 router = APIRouter(
     prefix="/chatbot",
     tags=["Chatbot News / Community"],

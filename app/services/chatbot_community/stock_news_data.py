@@ -372,7 +372,7 @@ class StockNewsDataProvider:
             response = model.generate_content(prompt)
             return response.text.strip()
         except Exception as e:
-            print(f"Warning: Gemini 번역 실패 - {type(e).__name__}: 응답 quota 또는 일시 오류")
+            print(f"Warning: Gemini 번역 실패 - {e}")
             return ""
 
     # ========================================
