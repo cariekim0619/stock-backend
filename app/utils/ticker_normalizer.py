@@ -70,6 +70,26 @@ MANUAL_NAME_TO_CODE: Dict[str, str] = {
 }
 MANUAL_CODE_TO_NAME: Dict[str, str] = {v: k for k, v in MANUAL_NAME_TO_CODE.items()}
 
+
+# 사용자가 챗봇에서 "삼성전자 뉴스", "카카오 커뮤니티 알려줘"처럼
+# 기능어를 함께 입력해도 종목명만 안정적으로 추출하기 위한 정리 규칙.
+_STOCK_QUERY_NOISE_RE = re.compile(
+    r"(?:뉴스\s*/?\s*커뮤니티|뉴스커뮤니티|뉴스|커뮤니티|브리핑|리포트|보고서|종목|주식|주가|"
+    r"알려줘|알려주세요|조회|검색|보기|확인|분석|요약|정보|관련|대한|에대한)",
+    re.IGNORECASE,
+)
+
+
+def clean_stock_query_text(text: str) -> str:
+    """챗봇 발화에서 종목 검색을 방해하는 기능어를 제거한다."""
+    raw = ("" if text is None else str(text)).strip()
+    if not raw:
+        return ""
+    cleaned = _STOCK_QUERY_NOISE_RE.sub(" ", raw)
+    cleaned = re.sub(r"[!?~,.。·•:;\\[\\]{}()<>]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or raw
+
 _S3_CLIENT = None
 _RUNTIME_CACHE_PAYLOAD: Optional[Dict[str, Any]] = None
 _RUNTIME_CACHE_TS: float = 0.0
@@ -404,19 +424,27 @@ def resolve_symbol_and_name(ticker: str, allow_unresolved: bool = False) -> Opti
     code_to_name: Dict[str, str] = index["code_to_name"]
     alias_to_code: Dict[str, str] = index["alias_to_code"]
 
-    if raw.isdigit():
-        code = raw.zfill(6) if len(raw) < 6 else raw
-        if _is_valid_code(code) and code in code_to_name:
+    candidates: List[str] = []
+    for candidate in (raw, clean_stock_query_text(raw)):
+        c = (candidate or "").strip()
+        if c and c not in candidates:
+            candidates.append(c)
+
+    for q in candidates:
+        if q.isdigit():
+            code = q.zfill(6) if len(q) < 6 else q
+            if _is_valid_code(code) and code in code_to_name:
+                return code, code_to_name[code]
+            if allow_unresolved and _is_valid_code(code):
+                return code, q
+
+        code = alias_to_code.get(_normalize_name_key(q))
+        if code and code in code_to_name:
             return code, code_to_name[code]
-        return (code, raw) if (allow_unresolved and _is_valid_code(code)) else None
 
-    code = alias_to_code.get(_normalize_name_key(raw))
-    if code and code in code_to_name:
-        return code, code_to_name[code]
-
-    code = MANUAL_NAME_TO_CODE.get(raw)
-    if code:
-        return code, MANUAL_CODE_TO_NAME.get(code, raw)
+        code = MANUAL_NAME_TO_CODE.get(q)
+        if code:
+            return code, MANUAL_CODE_TO_NAME.get(code, q)
 
     return (raw, raw) if allow_unresolved else None
 

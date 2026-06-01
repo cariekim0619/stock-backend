@@ -13,6 +13,8 @@ from app.utils.ticker_normalizer import get_lookup_status, resolve_symbol_and_na
 
 load_dotenv()
 
+ALLOW_UNVERIFIED_NUMERIC_TICKER = (os.getenv("ALLOW_UNVERIFIED_NUMERIC_TICKER", "true").strip().lower() not in {"0", "false", "no", "off"})
+
 
 def _now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -53,6 +55,11 @@ def _verify_and_normalize(company_name: str, ticker: str) -> Tuple[Optional[str]
     if resolved is not None:
         official_code, official_name = resolved
         return official_name, official_code, None
+
+    if ALLOW_UNVERIFIED_NUMERIC_TICKER and tick_in.isdigit() and len(tick_in) == 6 and name_in:
+        # Lambda가 이미 종목코드와 표시명을 확정해서 보낸 경우, EC2의 S3 캐시가 잠시 비어도
+        # 뉴스/커뮤니티 검색 자체는 진행한다. 사용자 화면의 "종목 없음" 오탐을 줄이기 위한 안전장치다.
+        return name_in, tick_in, None
 
     if not status.get("has_usable_data"):
         detail = status.get("last_error") or "종목 캐시를 읽을 수 없습니다."

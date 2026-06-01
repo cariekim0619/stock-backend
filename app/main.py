@@ -9,6 +9,7 @@ from app.routers import chatbot_news_community_router  # ✅ 기존 Chatbot_05
 from app.routers import glossary_router  # ✅ Chatbot_03 주식 용어 사전
 from app.routers import chatbot_transaction_router  # ✅ Chatbot_04 거래내역/요약 리포트
 from app.routers import chatbot_favorites_router  # ✅ Chatbot_06 관심 종목 추가
+from app.routers import kis_auto_link_router  # ✅ 로컬 Selenium 자동 계좌연결 결과 수신
 from app.utils.ticker_normalizer import warm_stock_universe_cache
 
 # ✅ 앱 시작 시 .env를 한 번만 로드
@@ -44,6 +45,9 @@ app.include_router(chatbot_transaction_router.router)
 
 # ✅ Chatbot_06 라우터
 app.include_router(chatbot_favorites_router.router)
+
+# ✅ KIS 자동 계좌연결 결과 수신
+app.include_router(kis_auto_link_router.router)
 
 
 @app.get("/")
