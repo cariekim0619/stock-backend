@@ -82,8 +82,13 @@ class ChatbotNewsCommunity:
             "특정 기업 소식 없이", "기본 관점", "주요 경제뉴스",
             "최신뉴스 섹션", "페이지 - 한국경제", "섹션 |", "증권경제 최신뉴스",
             "조재길", "주가 전망과 대응 방법", "관련기사", "많이 본 뉴스", "5 페이지",
+            "네이버 증권", "네이버페이 증권", "증권홈", "국내증시",
         ]
         if any(x.lower() in low for x in noisy):
+            return True
+        if re.fullmatch(r"(?i)naver", clean.strip()):
+            return True
+        if re.fullmatch(r"(?i).{0,40}\s*-\s*naver", clean.strip()):
             return True
         if clean.rstrip().endswith(("-", "–", "—", "|")):
             return True
@@ -653,8 +658,10 @@ class ChatbotNewsCommunity:
         timestamp = summary.get("timestamp", "최근")
         segment = normalize_segment(summary.get("segment"))
 
+        direct_input_hint = "종목명을 바로 입력해도 검색할 수 있어요."
+
         if not key_issues:
-            message = f"최근 {company_name} 관련 주요 뉴스가 아직 많지 않아요.\n\n종목은 확인됐지만, 지금은 바로 요약할 만한 뉴스가 부족해요. 잠시 후 다시 확인해 주세요."
+            message = f"최근 {company_name} 관련 주요 뉴스가 아직 많지 않아요.\n\n종목은 확인됐지만, 지금은 바로 요약할 만한 뉴스가 부족해요. 잠시 후 다시 확인해 주세요.\n\n{direct_input_hint}"
         else:
             cleaned_issues = []
             seen_issue_titles = set()
@@ -664,18 +671,23 @@ class ChatbotNewsCommunity:
                     continue
                 if title in seen_issue_titles:
                     continue
-                cleaned_issues.append(title)
+                cleaned_issues.append({
+                    "title": title,
+                    "url": issue.get("url", ""),
+                })
                 seen_issue_titles.add(title)
-            issues_text = "\n".join([f"• {title}" for title in cleaned_issues[:5]])
+            issues_text = "\n".join([f"• {issue['title']}" for issue in cleaned_issues[:5]])
             if not issues_text:
                 issues_text = "• 직접 관련된 주요 뉴스가 아직 많지 않아요"
             message = f"""{timestamp} {company_name} 관련
 주요 뉴스도 정리해봤어요.
 
-{issues_text}"""
+{issues_text}
+
+{direct_input_hint}"""
 
         # 첫 번째 뉴스 URL (기사 원문 보기용)
-        first_news_url = key_issues[0].get("url", "") if key_issues else ""
+        first_news_url = cleaned_issues[0].get("url", "") if 'cleaned_issues' in locals() and cleaned_issues else ""
 
         return {
             "version": "2.0",

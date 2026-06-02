@@ -85,7 +85,7 @@ class TavilySearchClient:
         if err is not None:
             return err
 
-        query = f"{official_name} 주식 뉴스 최신 실적 공시 목표가"
+        query = f"{official_name} 주식 뉴스 최신"
 
         try:
             response = self.client.search(
@@ -93,7 +93,7 @@ class TavilySearchClient:
                 search_depth="basic",
                 max_results=max_results,
                 include_answer=True,
-                include_domains=["naver.com", "hankyung.com", "mk.co.kr", "sedaily.com", "edaily.co.kr", "businesspost.co.kr"],
+                include_domains=["news.naver.com", "n.news.naver.com", "hankyung.com", "mk.co.kr", "sedaily.com", "edaily.co.kr", "businesspost.co.kr"],
             )
 
             return {
@@ -167,7 +167,7 @@ class TavilySearchClient:
                 search_depth="basic",
                 max_results=max_results,
                 include_answer=True,
-                include_domains=["naver.com", "hankyung.com", "mk.co.kr", "edaily.co.kr", "sedaily.com", "businesspost.co.kr"],
+                include_domains=["news.naver.com", "n.news.naver.com", "hankyung.com", "mk.co.kr", "edaily.co.kr", "sedaily.com", "businesspost.co.kr"],
             )
 
             return {

@@ -140,6 +140,10 @@ class StockNewsDataProvider:
     def _is_low_quality_url(self, url: str) -> bool:
         u = str(url or "").lower()
         noisy = [
+            # 포털/검색/증권 랜딩 페이지는 기사 원문이 아니므로 제외한다.
+            # 예: "네이버 증권 - NAVER" 같은 결과가 뉴스로 노출되는 문제 방지.
+            "finance.naver.com", "m.stock.naver.com", "m.finance.naver.com",
+            "search.naver.com", "m.search.naver.com",
             "blog.naver.com", "m.blog.naver.com", "cafe.naver.com", "post.naver.com",
             "youtube.com", "youtu.be", "traderfeels", "dcinside.com", "fmkorea.com",
         ]
@@ -156,8 +160,14 @@ class StockNewsDataProvider:
             "주가 전망, 목표주가", "주가전망 목표주가", "최신뉴스 섹션",
             "페이지 - 한국경제", "섹션 |", "증권경제 최신뉴스", "조재길",
             "주가 전망과 대응 방법", "관련기사", "많이 본 뉴스", "5 페이지",
+            "네이버 증권", "네이버페이 증권", "증권홈", "국내증시",
         ]
         if any(x.lower() in low for x in noisy):
+            return True
+        # Tavily가 포털 랜딩 페이지를 기사처럼 반환하는 대표 패턴.
+        if re.fullmatch(r"(?i)naver", t.strip()):
+            return True
+        if re.fullmatch(r"(?i).{0,40}\s*-\s*naver", t.strip()):
             return True
         if t.rstrip().endswith(("-", "–", "—", "|")):
             return True
@@ -170,8 +180,9 @@ class StockNewsDataProvider:
     def _is_company_relevant(self, item: Dict, company_name: str = "", symbol: str = "") -> bool:
         title = item.get("title", "")
         content = item.get("content", "")
-        url = item.get("url", "")
-        raw_text = f"{title} {content} {url}"
+        # URL에 종목코드가 들어 있다는 이유만으로 직접 관련 뉴스로 보지 않는다.
+        # finance.naver.com/item?code=357880 같은 랜딩 페이지가 SKAI 뉴스로 통과하는 문제를 막기 위함.
+        raw_text = f"{title} {content}"
         text = self._normalize_text(raw_text)
         name_key = self._normalize_text(company_name)
         symbol_key = self._normalize_text(symbol)
@@ -214,10 +225,9 @@ class StockNewsDataProvider:
 
         if relaxed_filtered:
             print(
-                f"[INFO] news strict company filter empty; using relaxed keyword fallback "
+                f"[INFO] news strict company filter empty; dropped relaxed keyword-only fallback "
                 f"company={company_name!r} symbol={symbol!r} count={len(relaxed_filtered)}"
             )
-            return relaxed_filtered
 
         return []
 
