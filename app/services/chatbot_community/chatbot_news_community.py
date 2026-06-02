@@ -407,8 +407,18 @@ class ChatbotNewsCommunity:
 
         items = news_data.get("items", [])
 
-        # 투자 영향도 HIGH/MEDIUM 뉴스만 선택
+        # 투자 영향도 HIGH/MEDIUM 뉴스만 우선 선택한다.
+        # 단, SKAI처럼 검색 결과가 1~2건뿐인 종목은 여기서 전부 탈락하면
+        # Lambda가 "없는 종목"처럼 오해하는 빈 뉴스 응답이 된다.
+        # 그래서 고영향 키워드가 없더라도 data_provider가 이미 통과시킨 후보는
+        # 보조 후보로 사용한다.
         filtered_news = self._filter_high_impact_news(items)
+        if not filtered_news and items:
+            print(
+                f"[INFO] news high-impact filter empty; using provider-filtered fallback "
+                f"company={company_name!r} symbol={symbol!r} count={len(items)}"
+            )
+            filtered_news = items
 
         # 핵심 이슈로 변환 (3-5개)
         key_issues = self._convert_to_key_issues(filtered_news[:5], company_name, segment=segment, profile=profile)
@@ -644,7 +654,7 @@ class ChatbotNewsCommunity:
         segment = normalize_segment(summary.get("segment"))
 
         if not key_issues:
-            message = f"최근 {company_name}와 직접 관련된 주요 뉴스를 찾지 못했어요.\n\n잠시 후 다시 확인해 주세요."
+            message = f"최근 {company_name} 관련 주요 뉴스가 아직 많지 않아요.\n\n종목은 확인됐지만, 지금은 바로 요약할 만한 뉴스가 부족해요. 잠시 후 다시 확인해 주세요."
         else:
             cleaned_issues = []
             seen_issue_titles = set()
