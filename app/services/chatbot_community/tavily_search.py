@@ -13,8 +13,6 @@ from app.utils.ticker_normalizer import get_lookup_status, resolve_symbol_and_na
 
 load_dotenv()
 
-ALLOW_UNVERIFIED_NUMERIC_TICKER = (os.getenv("ALLOW_UNVERIFIED_NUMERIC_TICKER", "true").strip().lower() not in {"0", "false", "no", "off"})
-
 
 def _now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -56,11 +54,6 @@ def _verify_and_normalize(company_name: str, ticker: str) -> Tuple[Optional[str]
         official_code, official_name = resolved
         return official_name, official_code, None
 
-    if ALLOW_UNVERIFIED_NUMERIC_TICKER and tick_in.isdigit() and len(tick_in) == 6 and name_in:
-        # Lambda가 이미 종목코드와 표시명을 확정해서 보낸 경우, EC2의 S3 캐시가 잠시 비어도
-        # 뉴스/커뮤니티 검색 자체는 진행한다. 사용자 화면의 "종목 없음" 오탐을 줄이기 위한 안전장치다.
-        return name_in, tick_in, None
-
     if not status.get("has_usable_data"):
         detail = status.get("last_error") or "종목 캐시를 읽을 수 없습니다."
         return None, None, _verify_failed_payload(company_name, ticker, detail)
@@ -92,7 +85,7 @@ class TavilySearchClient:
         if err is not None:
             return err
 
-        query = f"{official_name} {official_code} 증권 뉴스 실적 공시 목표가 최신"
+        query = f"{official_name} 주식 뉴스 최신 실적 공시 목표가"
 
         try:
             response = self.client.search(
@@ -100,7 +93,7 @@ class TavilySearchClient:
                 search_depth="basic",
                 max_results=max_results,
                 include_answer=True,
-                include_domains=["news.naver.com", "hankyung.com", "mk.co.kr", "sedaily.com", "edaily.co.kr", "businesspost.co.kr"],
+                include_domains=["naver.com", "hankyung.com", "mk.co.kr", "sedaily.com", "edaily.co.kr", "businesspost.co.kr"],
             )
 
             return {
@@ -166,7 +159,7 @@ class TavilySearchClient:
         if err is not None:
             return err
 
-        query = f"{official_name} {official_code} 주식 투자자 의견 실적 전망 종목토론"
+        query = f"{official_name} 주식 전망 투자 의견"
 
         try:
             response = self.client.search(
@@ -174,7 +167,7 @@ class TavilySearchClient:
                 search_depth="basic",
                 max_results=max_results,
                 include_answer=True,
-                include_domains=["finance.naver.com", "news.naver.com", "hankyung.com", "mk.co.kr", "edaily.co.kr", "sedaily.com", "businesspost.co.kr"],
+                include_domains=["naver.com", "hankyung.com", "mk.co.kr", "edaily.co.kr", "sedaily.com", "businesspost.co.kr"],
             )
 
             return {

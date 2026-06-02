@@ -253,35 +253,149 @@ class ChatbotFavorites:
     # 추천 종목 (KIS ranking API only)
     # ========================================
 
+    def _risk_profile_code(self, segment: Optional[str], profile: Optional[Dict[str, Any]]) -> str:
+        """Lambda 설문 payload에서 추천 정렬에 사용할 위험성향 코드를 추출한다."""
+        profile = profile or {}
+        for key in ("risk_profile", "risk_profile_5"):
+            value = str(profile.get(key) or "").replace("risk-", "").strip().lower()
+            if value in {"safe", "conservative", "neutral", "active", "aggressive", "skip"}:
+                return value
+        seg = str(segment or "").replace("risk-", "").strip().lower()
+        if seg in {"safe", "conservative", "neutral", "active", "aggressive", "skip"}:
+            return seg
+        return "neutral"
+
+    def _sector_hint(self, name: str) -> str:
+        """거래량/상승률 랭킹만 있을 때 최소 섹터 분산을 위한 가벼운 휴리스틱."""
+        n = (name or "").upper().replace(" ", "")
+        rules = [
+            ("반도체", ["삼성전자", "하이닉스", "HPSP", "리노공업", "원익", "ISC", "솔브레인", "동진쎄미", "DB하이텍", "테스", "주성엔지니어링"]),
+            ("2차전지", ["에코프로", "엘앤에프", "포스코퓨처", "금양", "천보", "삼성SDI", "LG에너지솔루션", "SK이노베이션"]),
+            ("바이오", ["바이오", "셀트리온", "HLB", "알테오젠", "유한양행", "삼성바이오", "리가켐", "펩트론"]),
+            ("자동차", ["현대차", "기아", "현대모비스", "HL만도", "한온시스템", "성우하이텍"]),
+            ("인터넷", ["NAVER", "네이버", "카카오", "더존", "엔씨", "크래프톤", "넷마블", "펄어비스"]),
+            ("금융", ["금융", "은행", "증권", "보험", "KB", "신한", "하나금융", "우리금융", "삼성화재", "메리츠"]),
+            ("에너지", ["한국전력", "가스", "S-OIL", "SK가스", "HD현대일렉트릭", "두산에너빌리티"]),
+            ("조선기계", ["조선", "HD현대", "한화오션", "삼성중공업", "두산", "LS", "효성중공업"]),
+            ("통신", ["SK텔레콤", "KT", "LG유플러스"]),
+            ("소비재", ["CJ", "오리온", "농심", "아모레", "LG생활건강", "하이트", "롯데"]),
+        ]
+        for sector, keywords in rules:
+            if any(k.upper().replace(" ", "") in n for k in keywords):
+                return sector
+        return "기타"
+
+    def _apply_recommendation_personalization(
+        self,
+        stocks: List[Dict],
+        *,
+        category: str,
+        segment: Optional[str],
+        profile: Optional[Dict[str, Any]],
+        limit: int = 5,
+    ) -> List[Dict]:
+        """설문 성향과 섹터 분산을 반영해 추천 후보를 5개로 줄인다.
+
+        원천 데이터는 KIS/FDR 랭킹이고, 여기서는 동일 섹터 쏠림 완화와 보수형 사용자의
+        과도한 급등주 노출 완화만 수행한다. 없는 종목/ETF성 후보는 추천 카운팅 대상이 되지 않도록 제외한다.
+        """
+        risk = self._risk_profile_code(segment, profile)
+        cleaned: List[Dict] = []
+        seen_symbols = set()
+        for idx, item in enumerate(stocks or []):
+            symbol = str(item.get("symbol") or item.get("ticker") or "").strip().zfill(6)
+            name = str(item.get("company_name") or item.get("name") or "").strip()
+            if not symbol or len(symbol) != 6 or not name or symbol in seen_symbols:
+                continue
+            upper_name = name.upper().replace(" ", "")
+            if any(tok in upper_name for tok in ("KODEX", "TIGER", "ACE", "KBSTAR", "SOL", "HANARO", "ARIRANG", "KOSEF", "ETF", "ETN")):
+                continue
+            row = dict(item)
+            row["symbol"] = symbol
+            row["company_name"] = name
+            row["sector"] = row.get("sector") or self._sector_hint(name)
+            row["_rank"] = idx
+            row["_risk_profile"] = risk
+            cleaned.append(row)
+            seen_symbols.add(symbol)
+
+        if risk in {"safe", "conservative"}:
+            # 보수형은 랭킹을 유지하되 당일 급등률이 과도한 후보는 뒤로 보낸다.
+            cleaned.sort(key=lambda x: (abs(float(x.get("change_rate") or 0)) >= 25, x.get("_rank", 0)))
+        elif risk in {"active", "aggressive"}:
+            # 적극/공격형은 원래 모멘텀 랭킹을 최대한 유지한다.
+            cleaned.sort(key=lambda x: x.get("_rank", 0))
+        else:
+            cleaned.sort(key=lambda x: x.get("_rank", 0))
+
+        selected: List[Dict] = []
+        used_sectors = set()
+        for item in cleaned:
+            sector = item.get("sector") or "기타"
+            if sector in used_sectors and len(used_sectors) < max(2, limit - 1):
+                continue
+            selected.append(item)
+            used_sectors.add(sector)
+            if len(selected) >= limit:
+                break
+
+        if len(selected) < limit:
+            selected_symbols = {x.get("symbol") for x in selected}
+            for item in cleaned:
+                if item.get("symbol") in selected_symbols:
+                    continue
+                selected.append(item)
+                if len(selected) >= limit:
+                    break
+
+        for item in selected:
+            item.pop("_rank", None)
+            item["personalized"] = risk != "skip"
+        return selected[:limit]
+
     def get_top_stocks(self, category: str = "volume", segment: Optional[str] = None, profile: Optional[Dict[str, Any]] = None) -> List[Dict]:
         """
         추천 종목 조회
-        - KIS ranking API만 사용한다.
-        - pykrx/KRX 로그인 fallback은 사용하지 않는다.
-        - 장외 시간, 권한, 키 설정, KIS non-JSON 응답 등으로 실패하면 빈 리스트를 반환하고
-          router에서 사용자 안내 메시지를 내려준다.
+        - KIS ranking API를 우선 사용한다.
+        - 설문을 마친 사용자는 위험성향과 섹터 분산을 반영해 TOP 후보를 5개로 줄인다.
+        - 설문을 건너뛴 사용자는 전체 랭킹 기반으로 제공한다.
         """
         cat = "volume" if category == "volume" else "return" if category == "return" else ""
         if not cat:
             print(f"[WARN] get_top_stocks: 잘못된 category={category}")
             return []
 
+        fetch_limit = int(os.getenv("FAVORITES_RECOMMEND_FETCH_LIMIT", "20"))
+        fetch_limit = max(5, min(fetch_limit, 50))
+
         try:
             from app.services.stock_list_data import StockListDataProvider
             provider = StockListDataProvider(getattr(self, "_hantu", None))
             sort_by = "volume" if cat == "volume" else "change_rate"
-            result = provider.get_sorted_market_stocks(sort_by=sort_by, order="desc", limit=5)
+            result = provider.get_sorted_market_stocks(sort_by=sort_by, order="desc", limit=fetch_limit)
 
             if not isinstance(result, dict):
                 print(f"[WARN] KIS ranking invalid response: {type(result).__name__}")
-                return []
+                return self._apply_recommendation_personalization(
+                    self._get_fdr_top_stocks(cat, limit=fetch_limit),
+                    category=cat,
+                    segment=segment,
+                    profile=profile,
+                    limit=5,
+                )
 
             if "error" in result:
                 print(f"[WARN] KIS ranking unavailable: {result.get('error')}")
-                return []
+                return self._apply_recommendation_personalization(
+                    self._get_fdr_top_stocks(cat, limit=fetch_limit),
+                    category=cat,
+                    segment=segment,
+                    profile=profile,
+                    limit=5,
+                )
 
             out: List[Dict] = []
-            for item in result.get("stocks", [])[:5]:
+            for item in result.get("stocks", [])[:fetch_limit]:
                 try:
                     out.append({
                         "symbol": item.get("ticker", ""),
@@ -289,19 +403,38 @@ class ChatbotFavorites:
                         "current_price": int(float(item.get("current_price") or 0)),
                         "change_rate": round(float(item.get("change_rate") or 0), 2),
                         "volume": int(float(item.get("volume") or 0)),
+                        "source": "kis_ranking",
                     })
                 except Exception as row_e:
                     print(f"[WARN] KIS ranking row parse failed: {row_e}; item={item}")
 
             if out:
-                return out
+                return self._apply_recommendation_personalization(
+                    out,
+                    category=cat,
+                    segment=segment,
+                    profile=profile,
+                    limit=5,
+                )
 
             print("[WARN] KIS ranking returned empty stocks; trying FDR fallback")
-            return self._get_fdr_top_stocks(cat, limit=5)
+            return self._apply_recommendation_personalization(
+                self._get_fdr_top_stocks(cat, limit=fetch_limit),
+                category=cat,
+                segment=segment,
+                profile=profile,
+                limit=5,
+            )
 
         except Exception as e:
             print(f"[WARN] get_top_stocks KIS ranking failed: {e}; trying FDR fallback")
-            return self._get_fdr_top_stocks(cat, limit=5)
+            return self._apply_recommendation_personalization(
+                self._get_fdr_top_stocks(cat, limit=fetch_limit),
+                category=cat,
+                segment=segment,
+                profile=profile,
+                limit=5,
+            )
 
     def _get_fdr_top_stocks(self, category: str = "volume", limit: int = 5) -> List[Dict]:
         """KIS 랭킹이 토큰 제한/장외시간 등으로 실패할 때 쓰는 안전 fallback.
@@ -923,8 +1056,15 @@ class ChatbotFavorites:
 
         list_text = "\n".join(lines)
 
+        personalized = any(bool(s.get("personalized")) for s in stocks[:5])
+        sectors = [s.get("sector") for s in stocks[:5] if s.get("sector") and s.get("sector") != "기타"]
+        note = ""
+        if personalized and sectors:
+            note = f"설문 결과를 바탕으로 섹터가 한쪽으로 몰리지 않게 정리했어요. ({', '.join(dict.fromkeys(sectors[:3]))})\n\n"
+
         text = (
             f"{category_label}을 기준으로 상위 5개 종목이에요!\n\n"
+            f"{note}"
             f"📁[{category_label} TOP 5]\n\n"
             f"{list_text}\n\n"
             "💡 마음에 드는 종목이 있다면 하단의 종목명 버튼을 눌러 확인해보세요!"
@@ -941,6 +1081,8 @@ class ChatbotFavorites:
                         "current_price": s.get("current_price", 0),
                         "change_rate": s.get("change_rate", 0),
                         "volume": s.get("volume", 0),
+                        "sector": s.get("sector", ""),
+                        "personalized": bool(s.get("personalized")),
                     }
                     for s in stocks[:5]
                 ],

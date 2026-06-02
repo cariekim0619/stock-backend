@@ -39,6 +39,8 @@ class FavoriteRecommendRequest(FavoriteBaseRequest):
     category: str = Field(..., description="volume 또는 return")
     segment: Optional[str] = Field("risk-neutral", description="skip 또는 risk-* 세그먼트")
     profile: Optional[Dict[str, Any]] = Field(None, description="설문 기반 개인화 프로필")
+    survey_profile: Optional[Dict[str, Any]] = Field(None, description="Lambda 호환용 설문 프로필")
+    personalization: Optional[Dict[str, Any]] = Field(None, description="개인화 컨텍스트")
 
 
 class FavoriteSummaryRequest(FavoriteBaseRequest):
@@ -483,7 +485,8 @@ def favorite_recommend(request: FavoriteRecommendRequest):
     if category not in {"volume", "return"}:
         return build_recommend_category_invalid_response()
 
-    stocks = chatbot.get_top_stocks(category, segment=request.segment, profile=request.profile)
+    profile = request.profile or request.survey_profile
+    stocks = chatbot.get_top_stocks(category, segment=request.segment, profile=profile)
 
     if not stocks:
         return build_recommend_empty_response()

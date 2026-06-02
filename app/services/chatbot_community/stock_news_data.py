@@ -185,26 +185,41 @@ class StockNewsDataProvider:
 
     def _filter_investment_news(self, results: List[Dict], company_name: str = "", symbol: str = "") -> List[Dict]:
         """
-        투자 관련 뉴스 2단계 필터링
-        1단계: 해당 기업명/티커 직접 관련성 확인
-        2단계: 투자 키워드 확인
+        투자 관련 뉴스 필터링.
+
+        live 버전은 회사명/티커 직접 포함을 너무 강하게 요구해 Tavily 결과가 전부 탈락하는 경우가 있었다.
+        그래서 1차로 회사 직접 관련 + 투자 키워드를 적용하고, 0건이면 예전 EC2 방식처럼
+        저품질 URL/제목을 제외한 투자 키워드 결과를 fallback으로 사용한다.
         """
-        filtered = []
+        strict_filtered: List[Dict] = []
+        relaxed_filtered: List[Dict] = []
 
         for item in results:
             title = item.get("title", "")
             content = item.get("content", "")
             if self._is_low_quality_url(item.get("url", "")) or self._is_low_quality_title(title):
                 continue
-            text = f"{title} {content}".lower()
 
-            if not self._is_company_relevant(item, company_name=company_name, symbol=symbol):
+            text = f"{title} {content}".lower()
+            if not any(kw in text for kw in self.investment_keywords):
                 continue
 
-            if any(kw in text for kw in self.investment_keywords):
-                filtered.append(item)
+            if self._is_company_relevant(item, company_name=company_name, symbol=symbol):
+                strict_filtered.append(item)
+            else:
+                relaxed_filtered.append(item)
 
-        return filtered
+        if strict_filtered:
+            return strict_filtered
+
+        if relaxed_filtered:
+            print(
+                f"[INFO] news strict company filter empty; using relaxed keyword fallback "
+                f"company={company_name!r} symbol={symbol!r} count={len(relaxed_filtered)}"
+            )
+            return relaxed_filtered
+
+        return []
 
     def _llm_classify_news(self, news_list: List[Dict]) -> List[Dict]:
         """LLM으로 투자 관련 뉴스 분류 (2단계)"""
