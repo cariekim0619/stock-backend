@@ -32,10 +32,15 @@ class ChatbotGlossary:
     """
 
     # 카카오 simpleText 최대 글자 수를 고려한 안전 길이
-    # 보수적으로 700자 내외를 목표로 생성하고
-    # 마지막 후처리에서는 900자 기준으로 한 번 더 잘라줍니다.
-    MAX_PROMPT_RESPONSE_CHARS = 700
-    MAX_FINAL_RESPONSE_CHARS = 900
+    # 카카오 말풍선이 잘리지 않도록 EC2 원문부터 짧게 만든다.
+    # Lambda가 다시 2~3개 말풍선으로 나누지만, 각 섹션 자체가 길면 모바일에서 잘린다.
+    MAX_PROMPT_RESPONSE_CHARS = 560
+    MAX_FINAL_RESPONSE_CHARS = 760
+    MAX_DEFINITION_CHARS = 150
+    MAX_USAGE_CHARS = 80
+    MAX_EXAMPLE_CHARS = 80
+    MAX_CAUTION_CHARS = 80
+    MAX_RELATED_DESC_CHARS = 52
 
     # 기획안 카테고리별 대표 용어
     CATEGORIES = {
@@ -169,12 +174,13 @@ class ChatbotGlossary:
         # 4. 유사 검색
         similar = self.glossary.find_similar(query, limit=5)
         if similar:
-            # 상위 1개가 매우 유사 → 바로 설명
+            # 상위 1개가 일반 투자자가 자주 쓰는 핵심 용어이고 prefix가 명확할 때만 바로 설명한다.
+            # 예: "볼린저" → "볼린저밴드".
+            # 예외적으로 "시스템" → "시스템적 중요 금융회사" 같은 제도/전문용어 자동 진입은 막는다.
             top = similar[0]
-            if (
-                query.lower() in top["term"].lower()
-                or top["term"].lower() in query.lower()
-            ):
+            qn = re.sub(r"[^0-9A-Za-z가-힣]", "", query).lower()
+            tn = re.sub(r"[^0-9A-Za-z가-힣]", "", top.get("term", "")).lower()
+            if qn and tn.startswith(qn) and self._is_curated_term(top.get("term", "")):
                 top_entry = self.glossary.lookup(top["term"])
                 if top_entry:
                     explanation = self._generate_explanation(top_entry, segment=segment, profile=profile)
@@ -185,7 +191,7 @@ class ChatbotGlossary:
                         "kb_data": top_entry,
                     }
 
-            # 여러 후보 → 선택
+            # 여러 후보는 후보 원문을 노출하지 않고 format_disambiguate_for_kakao에서 주목 용어로 대체한다.
             return {
                 "status": "multiple",
                 "candidates": similar[:4],
@@ -197,6 +203,34 @@ class ChatbotGlossary:
     def get_category_terms(self, category_name: str) -> Optional[List[str]]:
         """카테고리별 용어 목록 반환"""
         return self.CATEGORIES.get(category_name)
+
+    def _compact_text(self, value: str, limit: int) -> str:
+        """사용자에게 보여줄 한 항목을 문장/어절 기준으로 짧게 정리한다."""
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not text:
+            return ""
+        if len(text) <= limit:
+            return text
+
+        # 문장 경계가 앞쪽에 있으면 거기서 끊는다.
+        for sep in (". ", "다. ", "요. ", "! ", "? "):
+            idx = text.find(sep)
+            if 20 <= idx + len(sep) <= limit:
+                return text[:idx + len(sep)].strip()
+
+        cut = text[:limit].rstrip()
+        if " " in cut:
+            cut = cut.rsplit(" ", 1)[0].rstrip()
+        return cut + "…"
+
+    def _compact_related_desc(self, value: str) -> str:
+        return self._compact_text(value, self.MAX_RELATED_DESC_CHARS)
+
+    def _is_curated_term(self, term: str) -> bool:
+        curated = set(self.TRENDING_TERMS)
+        for terms in self.CATEGORIES.values():
+            curated.update(terms)
+        return str(term or "").strip() in curated
 
     # ========================================
     # 공통 유틸
@@ -281,9 +315,9 @@ class ChatbotGlossary:
         """LLM 기반 RAG 설명 생성"""
         term = entry.get("term", "")
         full_name = entry.get("full_name", "")
-        description = entry.get("description", "")
-        formula = entry.get("formula", "")
-        example = entry.get("example", "")
+        description = self._compact_text(entry.get("description", ""), self.MAX_DEFINITION_CHARS)
+        formula = self._compact_text(entry.get("formula", ""), 80)
+        example = self._compact_text(entry.get("example", ""), self.MAX_EXAMPLE_CHARS)
         interpretation = entry.get("interpretation", {})
         related_terms = entry.get("related_terms", [])
 
@@ -309,7 +343,7 @@ class ChatbotGlossary:
         for rt in related_terms[:2]:
             rt_entry = self.glossary.lookup(rt)
             if rt_entry:
-                rt_desc = rt_entry.get("description", "")[:60]
+                rt_desc = self._compact_related_desc(rt_entry.get("description", ""))
                 related_info.append(
                     f"{rt} ({rt_entry.get('full_name', '')}): {rt_desc}"
                 )
@@ -332,24 +366,24 @@ class ChatbotGlossary:
 - (객관적 정의 1문장. 공식이 있으면 포함)
 
 ➋ 언제 쓰이나요 ?
-- (이 용어가 실제로 사용되는 대표적인 상황 1~2문장)
+- (대표 사용 상황 1문장)
 
 ➌ 예시
-- (사실 기반 구체적인 예시 1~2문장)
+- (구체적인 예시 1문장)
 
 ➍ 주의할 점
-- (초보자가 오해하기 쉬운 포인트 1~2문장)
+- (오해하기 쉬운 포인트 1문장)
 
 ➎ 헷갈리기 쉬운 용어
-- {rt_1} : (차이점 1문장)
-- {rt_2} : (차이점 1문장)
+- {rt_1} : (차이점 1문장, 45자 이내)
+- {rt_2} : (차이점 1문장, 45자 이내)
 
 [규칙]
 - 위에 제공된 용어 사전 데이터만 근거로 작성하세요
 - 새로운 정의를 만들지 마세요
 - 투자 판단이나 의견을 제시하지 마세요
 - 쉽고 친근한 말투를 사용하세요
-- 각 항목은 1~2문장으로 간결하게 작성하세요
+- 각 항목은 1문장으로 간결하게 작성하세요
 - 전체 답변은 {self.MAX_PROMPT_RESPONSE_CHARS}자 이내로 작성하세요
 - 카카오톡 메시지 길이 제한을 고려하여 불필요하게 길게 쓰지 마세요""" + build_prompt_suffix(segment, domain="glossary", profile=profile)
 
@@ -369,7 +403,7 @@ class ChatbotGlossary:
                 prompt,
                 generation_config={
                     "temperature": 0.2,
-                    "max_output_tokens": 512,
+                    "max_output_tokens": 320,
                 }
             )
 
@@ -393,9 +427,9 @@ class ChatbotGlossary:
         """LLM 불가 시 KB 데이터 직접 포맷"""
         term = entry.get("term", "")
         full_name = entry.get("full_name", "")
-        description = entry.get("description", "")
-        formula = entry.get("formula", "")
-        example = entry.get("example", "")
+        description = self._compact_text(entry.get("description", ""), self.MAX_DEFINITION_CHARS)
+        formula = self._compact_text(entry.get("formula", ""), 80)
+        example = self._compact_text(entry.get("example", ""), self.MAX_EXAMPLE_CHARS)
         interpretation = entry.get("interpretation", {})
         related_terms = entry.get("related_terms", [])
 
@@ -424,6 +458,7 @@ class ChatbotGlossary:
 
         if not usage:
             usage = f"{term}은(는) 주식 분석에서 자주 사용되는 용어입니다."
+        usage = self._compact_text(usage, self.MAX_USAGE_CHARS)
 
         text += f"➋ 언제 쓰이나요 ?\n- {usage}\n\n"
 
@@ -442,6 +477,7 @@ class ChatbotGlossary:
 
         if not caution:
             caution = "업종이나 시장 상황에 따라 해석이 달라질 수 있어요."
+        caution = self._compact_text(caution, self.MAX_CAUTION_CHARS)
 
         text += f"➍ 주의할 점\n- {caution}\n\n"
 
@@ -452,12 +488,7 @@ class ChatbotGlossary:
                 rt_entry = self.glossary.lookup(rt)
                 if rt_entry:
                     rt_desc = (rt_entry.get("description", "") or "").strip()
-                    if len(rt_desc) > 80:
-                        cut = rt_desc[:80].rstrip()
-                        # 문장/어절이 어중간하게 끊기지 않도록 마지막 공백 기준으로 정리
-                        if " " in cut:
-                            cut = cut.rsplit(" ", 1)[0].rstrip()
-                        rt_desc = cut + "…"
+                    rt_desc = self._compact_related_desc(rt_desc)
                     text += f"- {rt} : {rt_desc}\n"
                 else:
                     text += f"- {rt}\n"
