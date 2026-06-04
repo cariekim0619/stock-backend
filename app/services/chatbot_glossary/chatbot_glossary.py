@@ -66,6 +66,14 @@ class ChatbotGlossary:
         "ELW": "ELW",
     }
 
+    # 모호하거나 검색 실패한 입력에서 보여줄 안전한 주목 용어
+    # 짧은 입력값으로 glossary.json 전체를 유사 검색하면 전문/제도 용어가 노출되기 쉬워
+    # 사용자에게 익숙한 핵심 용어만 고정 추천한다.
+    TRENDING_TERMS = [
+        "PER", "PBR", "ROE", "RSI", "이동평균", "거래량",
+        "손절", "익절", "물타기", "평단가", "레버리지", "ETF",
+    ]
+
     def __init__(self):
         """Initialize"""
         from app.services.chatbot_glossary.glossary_api import GlossaryAPI
@@ -109,6 +117,12 @@ class ChatbotGlossary:
         if not query:
             return {"status": "not_found"}
 
+        query_norm = re.sub(r"[^0-9A-Za-z가-힣]", "", query).strip()
+
+        # 한 글자 입력은 긴 전문용어와 엉뚱하게 매칭되기 쉬우므로 추천/모호성 플로우로 보내지 않는다.
+        if len(query_norm) < 2 and not re.fullmatch(r"[A-Za-z]{2,}", query):
+            return {"status": "not_found"}
+
         # 1. 정확 검색
         entry = self.glossary.lookup(query)
         if entry:
@@ -120,7 +134,26 @@ class ChatbotGlossary:
                 "kb_data": entry,
             }
 
-        # 2. 문장형 질문에서 핵심 용어 추출
+        # 2. 주목 용어 prefix 우선 보정
+        # 예: "레버"는 긴 전문용어인 레버리지비율보다 일반 사용자가 기대하는 "레버리지"로 연결한다.
+        curated_matches = []
+        for term in self.TRENDING_TERMS:
+            term_norm = re.sub(r"[^0-9A-Za-z가-힣]", "", term).strip().lower()
+            if query_norm.lower() and term_norm.startswith(query_norm.lower()):
+                entry = self.glossary.lookup(term)
+                if entry:
+                    curated_matches.append((len(term_norm), term, entry))
+        if curated_matches:
+            _, _, entry = sorted(curated_matches, key=lambda x: (x[0], x[1]))[0]
+            explanation = self._generate_explanation(entry, segment=segment, profile=profile)
+            return {
+                "status": "found",
+                "term": entry["term"],
+                "explanation": explanation,
+                "kb_data": entry,
+            }
+
+        # 3. 문장형 질문에서 핵심 용어 추출
         extracted = self._extract_term_from_sentence(query)
         if extracted:
             entry = self.glossary.lookup(extracted)
@@ -133,7 +166,7 @@ class ChatbotGlossary:
                     "kb_data": entry,
                 }
 
-        # 3. 유사 검색
+        # 4. 유사 검색
         similar = self.glossary.find_similar(query, limit=5)
         if similar:
             # 상위 1개가 매우 유사 → 바로 설명
@@ -158,7 +191,7 @@ class ChatbotGlossary:
                 "candidates": similar[:4],
             }
 
-        # 4. 못 찾음
+        # 5. 못 찾음
         return {"status": "not_found"}
 
     def get_category_terms(self, category_name: str) -> Optional[List[str]]:
@@ -418,7 +451,13 @@ class ChatbotGlossary:
             for rt in related_terms[:2]:
                 rt_entry = self.glossary.lookup(rt)
                 if rt_entry:
-                    rt_desc = rt_entry.get("description", "")[:50]
+                    rt_desc = (rt_entry.get("description", "") or "").strip()
+                    if len(rt_desc) > 80:
+                        cut = rt_desc[:80].rstrip()
+                        # 문장/어절이 어중간하게 끊기지 않도록 마지막 공백 기준으로 정리
+                        if " " in cut:
+                            cut = cut.rsplit(" ", 1)[0].rstrip()
+                        rt_desc = cut + "…"
                     text += f"- {rt} : {rt_desc}\n"
                 else:
                     text += f"- {rt}\n"
@@ -429,6 +468,10 @@ class ChatbotGlossary:
 
     def _extract_term_from_sentence(self, sentence: str) -> Optional[str]:
         """문장에서 핵심 용어 추출"""
+        sentence_norm = re.sub(r"[^0-9A-Za-z가-힣]", "", sentence or "").strip()
+        if len(sentence_norm) < 2 and not re.fullmatch(r"[A-Za-z]{2,}", (sentence or "").strip()):
+            return None
+
         # 1. 영문 약어 추출 (PER, RSI 등)
         eng_matches = re.findall(r"[A-Za-z]{2,}", sentence)
         for m in eng_matches:
@@ -466,6 +509,31 @@ class ChatbotGlossary:
     # 카카오톡 포맷
     # ========================================
 
+    def _quick_reply_for_term(self, term: str) -> Dict:
+        label = self.DISPLAY_LABELS.get(term, term)
+        if len(label) > 20:
+            label = label[:17] + "..."
+        return {
+            "action": "block",
+            "label": label,
+            "messageText": term,
+            "blockId": "glossary_term_block",
+        }
+
+    def _trending_quick_replies(self, limit: int = 6) -> List[Dict]:
+        out = []
+        seen = set()
+        for term in self.TRENDING_TERMS:
+            if term in seen:
+                continue
+            if not self.glossary.lookup(term):
+                continue
+            out.append(self._quick_reply_for_term(term))
+            seen.add(term)
+            if len(out) >= limit:
+                break
+        return out
+
     def format_entry_for_kakao(self) -> Dict:
         """
         기능 진입 안내 카카오 응답
@@ -483,8 +551,8 @@ class ChatbotGlossary:
                             "• 정확한 정의\n"
                             "• 언제 쓰이는지\n"
                             "• 헷갈리기 쉬운 포인트\n\n"
-                            "하단의 퀵 버튼을 눌러\n"
-                            "궁금한 용어를 확인하세요 !"
+                            "하단의 버튼을 누르거나,\n"
+                            "궁금한 용어를 채팅창에 바로 입력해 주세요 !"
                         )
                     }
                 }],
@@ -512,12 +580,6 @@ class ChatbotGlossary:
                         "label": "차트 · 기술적 용어",
                         "messageText": "차트 · 기술적 용어",
                         "blockId": "glossary_category_block",
-                    },
-                    {
-                        "action": "block",
-                        "label": "용어 직접 입력",
-                        "messageText": "용어 직접 입력",
-                        "blockId": "glossary_input_block",
                     },
                     {
                         "action": "block",
@@ -595,11 +657,11 @@ class ChatbotGlossary:
                         "text": self._safe_truncate_text(result["explanation"])
                     }
                 }],
-                "quickReplies": [
+                "quickReplies": self._trending_quick_replies(limit=6) + [
                     {
                         "action": "block",
-                        "label": "다른 용어 질문",
-                        "messageText": "다른 용어",
+                        "label": "다른 카테고리 보기",
+                        "messageText": "다른 카테고리",
                         "blockId": "glossary_entry_block",
                     },
                     {
@@ -614,53 +676,43 @@ class ChatbotGlossary:
 
     def format_disambiguate_for_kakao(self, candidates: List[Dict]) -> Dict:
         """
-        여러 의미 선택 카카오 응답
-
-        기획: 여러 의미 → 선택 퀵 버튼 + 다시 입력
+        여러 의미 선택 플로우는 사용자 경험상 혼란이 커서 더 이상 후보를 그대로 노출하지 않는다.
+        대신 많이 쓰는 주목 용어를 제안하고, 사용자가 원하는 용어는 채팅창에 바로 입력하게 한다.
         """
-        quick_replies = []
-        for c in candidates[:4]:
-            term = c["term"]
-            full_name = c.get("full_name", "")
-            label = f"{term} ({full_name})" if full_name else term
-            if len(label) > 20:
-                label = label[:17] + "..."
-            quick_replies.append({
-                "action": "block",
-                "label": label,
-                "messageText": term,
-                "blockId": "glossary_term_block",
-            })
-
-        quick_replies.append({
-            "action": "block",
-            "label": "다시 입력",
-            "messageText": "다시 입력",
-            "blockId": "glossary_input_block",
-        })
-
         return {
             "version": "2.0",
             "template": {
                 "outputs": [{
                     "simpleText": {
                         "text": (
-                            "⚠️ 입력하신 용어가\n"
-                            "여러 의미로 사용될 수 있어요\n\n"
-                            "아래의 의미 중에서\n"
-                            "어떤 의미를 자세하게 알고 싶으신가요?"
+                            "입력하신 표현과 정확히 일치하는 용어를 찾지 못했어요.\n\n"
+                            "아래 주목받는 용어를 눌러 확인하거나,\n"
+                            "궁금한 용어를 채팅창에 바로 입력해 주세요."
                         )
                     }
                 }],
-                "quickReplies": quick_replies,
+                "quickReplies": self._trending_quick_replies(limit=8) + [
+                    {
+                        "action": "block",
+                        "label": "다른 카테고리 보기",
+                        "messageText": "다른 카테고리",
+                        "blockId": "glossary_entry_block",
+                    },
+                    {
+                        "action": "block",
+                        "label": "종료",
+                        "messageText": "종료",
+                        "blockId": "end_block",
+                    },
+                ],
             },
         }
 
     def format_not_found_for_kakao(self) -> Dict:
         """
         검색 실패 카카오 응답
-
-        기획: 못 찾음 안내 + 카테고리 퀵 버튼
+        - 직접 입력 퀵버튼을 노출하지 않는다.
+        - 이상한 유사 후보 대신 검증된 주목 용어를 추천한다.
         """
         return {
             "version": "2.0",
@@ -668,20 +720,13 @@ class ChatbotGlossary:
                 "outputs": [{
                     "simpleText": {
                         "text": (
-                            "⚠️ 해당 용어를\n"
-                            "사전에서 찾지 못했어요\n\n"
-                            "공식 용어가 아닐 수 있어요.\n"
-                            "다른 표현으로 다시 입력해 주세요."
+                            "⚠️ 해당 용어를 사전에서 찾지 못했어요.\n\n"
+                            "아래 주목받는 용어를 눌러 확인하거나,\n"
+                            "궁금한 용어를 채팅창에 바로 입력해 주세요."
                         )
                     }
                 }],
-                "quickReplies": [
-                    {
-                        "action": "block",
-                        "label": "다시 입력",
-                        "messageText": "다시 입력",
-                        "blockId": "glossary_input_block",
-                    },
+                "quickReplies": self._trending_quick_replies(limit=8) + [
                     {
                         "action": "block",
                         "label": "지표·숫자 용어",
@@ -696,13 +741,7 @@ class ChatbotGlossary:
                     },
                     {
                         "action": "block",
-                        "label": "손익 · 수익률 관련",
-                        "messageText": "손익 · 수익률 관련",
-                        "blockId": "glossary_category_block",
-                    },
-                    {
-                        "action": "block",
-                        "label": "차트 · 기술적 용어",
+                        "label": "차트 · 기술",
                         "messageText": "차트 · 기술적 용어",
                         "blockId": "glossary_category_block",
                     },

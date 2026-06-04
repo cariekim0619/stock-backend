@@ -106,44 +106,48 @@ class GlossaryAPI:
         """
         유사 용어 검색 (부분 매칭)
 
-        Args:
-            query: 검색어
-            limit: 최대 결과 수
-
-        Returns:
-            [{"term": "PER", "full_name": "주가수익비율", "category": "재무비율"}, ...]
+        너무 짧은 입력(예: "주", "이", "레")은 수천 개 설명문/긴 전문용어와
+        엉뚱하게 매칭되므로 후보 추천을 하지 않는다.
+        추천 후보는 용어명, 표시명, 영문명 중심으로만 만들고 description 본문 매칭은 제외한다.
         """
         results = []
         query = self._alias(query)
-        query_lower = query.lower()
+        query_lower = query.lower().strip()
         query_norm = self._norm(query)
+
+        if len(query_norm) < 2 and not re.fullmatch(r"[A-Za-z]{2,}", query.strip()):
+            return []
 
         for key, value in self._data.items():
             score = 0
             full_name = value.get("full_name", "")
             english = value.get("english", "")
-            description = value.get("description", "")
 
             key_lower = key.lower()
             full_lower = full_name.lower()
             eng_lower = english.lower()
-            desc_lower = description.lower()
             key_norm = self._norm(key)
             full_norm = self._norm(full_name)
             eng_norm = self._norm(english)
 
-            # 키 매칭 (양방향: 검색어가 키에 포함 OR 키가 검색어에 포함)
-            if query_lower in key_lower or key_lower in query_lower or (query_norm and (query_norm in key_norm or key_norm in query_norm)):
-                score += 10
-            # full_name 매칭 (양방향)
-            if query_lower in full_lower or full_lower in query_lower or (query_norm and (query_norm in full_norm or full_norm in query_norm)):
-                score += 8
-            # english 매칭 (양방향)
-            if query_lower in eng_lower or eng_lower in query_lower or (query_norm and (query_norm in eng_norm or eng_norm in query_norm)):
-                score += 6
-            # description 매칭 (단방향: 검색어가 설명에 포함)
-            if query_lower in desc_lower:
-                score += 3
+            if query_norm and query_norm == key_norm:
+                score += 100
+            elif query_norm and key_norm.startswith(query_norm):
+                score += 40
+            elif query_norm and query_norm in key_norm and len(query_norm) >= 3:
+                score += 18
+
+            if query_norm and query_norm == full_norm:
+                score += 80
+            elif query_norm and full_norm.startswith(query_norm):
+                score += 30
+            elif query_norm and query_norm in full_norm and len(query_norm) >= 3:
+                score += 12
+
+            if query_lower and query_lower == eng_lower:
+                score += 70
+            elif query_lower and eng_lower.startswith(query_lower) and len(query_lower) >= 2:
+                score += 25
 
             if score > 0:
                 results.append({
@@ -153,13 +157,9 @@ class GlossaryAPI:
                     "score": score,
                 })
 
-        # 점수 내림차순 정렬
-        results.sort(key=lambda x: x["score"], reverse=True)
-
-        # score 제거 후 반환
+        results.sort(key=lambda x: (-x["score"], len(x["term"]), x["term"]))
         for r in results:
             del r["score"]
-
         return results[:limit]
 
     def get_related_terms(self, term: str) -> List[Dict]:
