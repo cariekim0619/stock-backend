@@ -40,7 +40,7 @@ class ChatbotGlossary:
     MAX_USAGE_CHARS = 80
     MAX_EXAMPLE_CHARS = 80
     MAX_CAUTION_CHARS = 80
-    MAX_RELATED_DESC_CHARS = 52
+    MAX_RELATED_DESC_CHARS = 42
 
     # 기획안 카테고리별 대표 용어
     CATEGORIES = {
@@ -125,7 +125,8 @@ class ChatbotGlossary:
         query_norm = re.sub(r"[^0-9A-Za-z가-힣]", "", query).strip()
 
         # 한 글자 입력은 긴 전문용어와 엉뚱하게 매칭되기 쉬우므로 추천/모호성 플로우로 보내지 않는다.
-        if len(query_norm) < 2 and not re.fullmatch(r"[A-Za-z]{2,}", query):
+        # 예: 사용자가 I를 입력했을 때 ELW의 영문명 Equity Linked Warrant로 자동 연결되면 안 된다.
+        if not self._allow_exact_short_query(query):
             return {"status": "not_found"}
 
         # 1. 정확 검색
@@ -204,7 +205,7 @@ class ChatbotGlossary:
         """카테고리별 용어 목록 반환"""
         return self.CATEGORIES.get(category_name)
 
-    def _compact_text(self, value: str, limit: int) -> str:
+    def _compact_text(self, value: str, limit: int, *, ellipsis: bool = True) -> str:
         """사용자에게 보여줄 한 항목을 문장/어절 기준으로 짧게 정리한다."""
         text = re.sub(r"\s+", " ", str(value or "")).strip()
         if not text:
@@ -221,16 +222,52 @@ class ChatbotGlossary:
         cut = text[:limit].rstrip()
         if " " in cut:
             cut = cut.rsplit(" ", 1)[0].rstrip()
-        return cut + "…"
+        if not cut:
+            cut = text[:limit].rstrip()
+        return cut
 
-    def _compact_related_desc(self, value: str) -> str:
-        return self._compact_text(value, self.MAX_RELATED_DESC_CHARS)
+    _RELATED_SHORT_DESCRIPTIONS = {
+        "ROE": "자기자본으로 이익을 얼마나 냈는지 보는 지표",
+        "총자산": "기업이 보유한 전체 자산",
+        "옵션": "정해진 가격으로 살 권리 또는 팔 권리",
+        "파생상품": "기초자산 가격에 따라 가치가 변하는 상품",
+        "이동평균": "일정 기간 주가의 평균선",
+        "이동평균선": "일정 기간 주가의 평균선",
+        "캔들차트": "시가·고가·저가·종가를 봉으로 나타낸 차트",
+        "표준편차": "값이 평균에서 얼마나 흩어져 있는지 나타내는 지표",
+        "ETF": "지수나 자산을 따라가도록 만든 상장 펀드",
+        "레버리지": "차입·배율로 손익 변동폭을 키우는 방식",
+        "손절": "손실 확대를 막기 위해 매도하는 것",
+        "평단가": "여러 번 매수한 평균 매입 가격",
+    }
+
+    def _compact_related_desc(self, value: str, term: str = "") -> str:
+        term = str(term or "").strip()
+        if term in self._RELATED_SHORT_DESCRIPTIONS:
+            return self._RELATED_SHORT_DESCRIPTIONS[term]
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not text:
+            return ""
+        # 긴 설명을 억지로 말줄임표로 자르지 않는다. 들어맞는 짧은 문장만 쓰고, 아니면 설명을 생략한다.
+        short = self._compact_text(text, self.MAX_RELATED_DESC_CHARS, ellipsis=False)
+        return short if len(short) <= self.MAX_RELATED_DESC_CHARS else ""
 
     def _is_curated_term(self, term: str) -> bool:
         curated = set(self.TRENDING_TERMS)
         for terms in self.CATEGORIES.values():
             curated.update(terms)
         return str(term or "").strip() in curated
+
+    def _allow_exact_short_query(self, query: str) -> bool:
+        """한 글자 입력은 자동 매칭하지 않는다. 단, 실제 사전에 있는 한글 1글자 용어만 예외 허용."""
+        raw = str(query or "").strip()
+        norm = re.sub(r"[^0-9A-Za-z가-힣]", "", raw).strip()
+        if len(norm) >= 2 or re.fullmatch(r"[A-Za-z]{2,}", raw):
+            return True
+        # 영문 한 글자는 I/l 같은 오입력으로 ELW 등과 엉뚱하게 매칭되기 쉬워 금지
+        if re.fullmatch(r"[A-Za-z]", raw):
+            return False
+        return raw in self.glossary.get_all_terms()
 
     # ========================================
     # 공통 유틸
@@ -259,7 +296,7 @@ class ChatbotGlossary:
             if last_newline > max_len - 80:
                 trimmed = trimmed[:last_newline].rstrip()
 
-        return trimmed + "\n..."
+        return trimmed
 
     def _clean_llm_text(self, text: str) -> str:
         """
@@ -305,7 +342,10 @@ class ChatbotGlossary:
         - A : ...
         - B : ...
         """
-        if self.genai:
+        # 운영 기본값은 KB 기반 deterministic 포맷이다.
+        # LLM이 간혹 ➋/➍ 제목을 바꾸거나 긴 문장을 만들어 카카오 말풍선에서 잘리는 문제가 있어
+        # 명시적으로 GLOSSARY_USE_LLM=1일 때만 사용한다.
+        if os.getenv("GLOSSARY_USE_LLM", "0").strip() == "1" and self.genai:
             llm_text = self._rag_explanation(entry, segment=segment, profile=profile)
             if llm_text:
                 return llm_text
@@ -343,7 +383,7 @@ class ChatbotGlossary:
         for rt in related_terms[:2]:
             rt_entry = self.glossary.lookup(rt)
             if rt_entry:
-                rt_desc = self._compact_related_desc(rt_entry.get("description", ""))
+                rt_desc = self._compact_related_desc(rt_entry.get("description", ""), rt)
                 related_info.append(
                     f"{rt} ({rt_entry.get('full_name', '')}): {rt_desc}"
                 )
@@ -488,8 +528,8 @@ class ChatbotGlossary:
                 rt_entry = self.glossary.lookup(rt)
                 if rt_entry:
                     rt_desc = (rt_entry.get("description", "") or "").strip()
-                    rt_desc = self._compact_related_desc(rt_desc)
-                    text += f"- {rt} : {rt_desc}\n"
+                    rt_desc = self._compact_related_desc(rt_desc, rt)
+                    text += f"- {rt} : {rt_desc}\n" if rt_desc else f"- {rt}\n"
                 else:
                     text += f"- {rt}\n"
         else:
