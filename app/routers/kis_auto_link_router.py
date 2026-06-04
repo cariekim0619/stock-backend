@@ -179,9 +179,25 @@ KIS_LOCAL_AGENT_URL = (os.getenv("KIS_LOCAL_AGENT_URL") or "http://127.0.0.1:180
 KIS_LOCAL_AGENT_TIMEOUT = float(os.getenv("KIS_LOCAL_AGENT_TIMEOUT", "240"))
 
 
+def _local_agent_token() -> str:
+    # Lambda -> EC2 may use a per-job token, while the local Mac agent expects the
+    # shared local-agent token. Do not forward Lambda's per-job token to the agent.
+    # Translate it here to the token configured on EC2 and Mac.
+    return (
+        os.getenv("KIS_LOCAL_AGENT_API_TOKEN")
+        or os.getenv("KIS_JOB_TOKEN")
+        or ""
+    ).strip()
+
+
 def _local_agent_headers(authorization: Optional[str]) -> Dict[str, str]:
     headers = {"Content-Type": "application/json"}
-    if authorization:
+    token = _local_agent_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    elif authorization:
+        # Backward compatibility: if no shared local-agent token is configured on EC2,
+        # forward the inbound header as before.
         headers["Authorization"] = authorization
     return headers
 
