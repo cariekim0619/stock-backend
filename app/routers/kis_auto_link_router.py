@@ -258,6 +258,11 @@ def session_select_env(payload: Dict[str, Any] = Body(default_factory=dict), aut
     return _proxy_local_agent("/session/select-env", payload, authorization)
 
 
+@router.post("/session/issue-otp-done")
+def session_issue_otp_done(payload: Dict[str, Any] = Body(default_factory=dict), authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    return _proxy_local_agent("/session/issue-otp-done", payload, authorization)
+
+
 @router.post("/session/close")
 def session_close(payload: Dict[str, Any] = Body(default_factory=dict), authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
     return _proxy_local_agent("/session/close", payload, authorization)
