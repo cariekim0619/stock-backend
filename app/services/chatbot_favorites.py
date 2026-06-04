@@ -1052,7 +1052,9 @@ class ChatbotFavorites:
             chg_emoji = "🔺" if chg > 0 else ("🔻" if chg < 0 else "➖")
             chg_str = f"{abs(chg):.1f}%"
             price_str = f"{int(s.get('current_price') or 0):,}원"
-            lines.append(f"{emoji} {s.get('company_name', '')} ({price_str} / {chg_emoji} {chg_str})")
+            sector = str(s.get("sector") or "").strip()
+            sector_text = f" · {sector}" if sector and sector != "기타" else ""
+            lines.append(f"{emoji} {s.get('company_name', '')}{sector_text} ({price_str} / {chg_emoji} {chg_str})")
 
         list_text = "\n".join(lines)
 
@@ -1060,7 +1062,7 @@ class ChatbotFavorites:
         sectors = [s.get("sector") for s in stocks[:5] if s.get("sector") and s.get("sector") != "기타"]
         note = ""
         if personalized and sectors:
-            note = f"설문 결과를 바탕으로 섹터가 한쪽으로 몰리지 않게 정리했어요. ({', '.join(dict.fromkeys(sectors[:3]))})\n\n"
+            note = f"설문 결과를 바탕으로 같은 성향 기준과 섹터 분산을 함께 반영했어요. ({', '.join(dict.fromkeys(sectors[:3]))})\n\n"
 
         text = (
             f"{category_label}을 기준으로 상위 5개 종목이에요!\n\n"
@@ -1074,6 +1076,7 @@ class ChatbotFavorites:
             "version": "2.0",
             "data": {
                 "category": category,
+                "recommendation_basis": "survey_segment_and_sector_diversification" if personalized else "all_users_market_ranking",
                 "stocks": [
                     {
                         "ticker": s.get("symbol", ""),
@@ -1083,6 +1086,7 @@ class ChatbotFavorites:
                         "volume": s.get("volume", 0),
                         "sector": s.get("sector", ""),
                         "personalized": bool(s.get("personalized")),
+                        "risk_profile": s.get("_risk_profile", ""),
                     }
                     for s in stocks[:5]
                 ],
