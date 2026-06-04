@@ -228,11 +228,6 @@ def session_start(payload: Dict[str, Any] = Body(default_factory=dict), authoriz
     return _proxy_local_agent("/session/start", payload, authorization)
 
 
-@router.post("/session/otp-done")
-def session_otp_done(payload: Dict[str, Any] = Body(default_factory=dict), authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
-    return _proxy_local_agent("/session/otp-done", payload, authorization)
-
-
 @router.post("/session/phone-agree")
 def session_phone_agree(payload: Dict[str, Any] = Body(default_factory=dict), authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
     return _proxy_local_agent("/session/phone-agree", payload, authorization)
