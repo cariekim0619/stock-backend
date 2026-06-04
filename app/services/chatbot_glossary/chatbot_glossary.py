@@ -509,15 +509,7 @@ class ChatbotGlossary:
             text += "➌ 예시\n- (예시 준비 중)\n\n"
 
         # ➍ 주의할 점
-        caution = ""
-        for key in ["caution", "risk", "note", "warning", "danger"]:
-            if key in interpretation:
-                caution = interpretation[key]
-                break
-
-        if not caution:
-            caution = "업종이나 시장 상황에 따라 해석이 달라질 수 있어요."
-        caution = self._compact_text(caution, self.MAX_CAUTION_CHARS)
+        caution = self._entry_caution(term, entry)
 
         text += f"➍ 주의할 점\n- {caution}\n\n"
 
@@ -714,6 +706,42 @@ class ChatbotGlossary:
             },
         }
 
+
+    def _category_caution(self, term: str, entry: dict) -> str:
+        """용어별 주의 문구가 없을 때 쓰는 카테고리 기반 보조 문구.
+
+        모든 용어에 같은 "업종이나 시장 상황..." 문구가 붙으면
+        사용자가 실제 용어별 설명으로 느끼기 어렵기 때문에,
+        category/term을 반영해 짧게 다르게 안내한다.
+        """
+        term = (term or "이 용어").strip() or "이 용어"
+        category = str((entry or {}).get("category") or "").strip()
+        if "기술" in category or "차트" in category:
+            return f"{term}은 보조 지표이므로 거래량·추세와 함께 확인하는 것이 좋아요."
+        if "재무" in category or "비율" in category or "지표" in category:
+            return f"{term}은 업종별 기준이 다르므로 같은 업종 기업끼리 비교하는 것이 좋아요."
+        if "상품" in category or "파생" in category:
+            return f"{term}은 상품 구조와 손실 가능성을 먼저 확인한 뒤 접근하는 것이 좋아요."
+        if "전략" in category or "매수" in category or "매도" in category:
+            return f"{term}은 원칙 없이 사용하면 손실이 커질 수 있어요. 기준을 미리 정해두는 것이 좋아요."
+        if "손익" in category or "수익" in category:
+            return f"{term}은 수익률만 보지 말고 투자금 규모와 보유 기간을 함께 봐야 해요."
+        return f"{term} 하나만으로 판단하지 말고 관련 지표와 함께 확인하는 것이 좋아요."
+
+    def _entry_caution(self, term: str, entry: dict) -> str:
+        for key in ["caution", "risk", "note", "warning", "danger"]:
+            value = str((entry or {}).get(key) or "").strip()
+            if value:
+                return self._compact_text(value, self.MAX_CAUTION_CHARS)
+
+        interpretation = (entry or {}).get("interpretation") or {}
+        if isinstance(interpretation, dict):
+            for key in ["risk", "caution", "warning", "danger"]:
+                value = str(interpretation.get(key) or "").strip()
+                if value:
+                    return self._compact_text(value, self.MAX_CAUTION_CHARS)
+
+        return self._compact_text(self._category_caution(term, entry), self.MAX_CAUTION_CHARS)
     def format_explanation_for_kakao(self, result: Dict) -> Dict:
         """
         용어 설명 카카오 응답
