@@ -163,3 +163,80 @@ def receive_kis_auto_link_result(
     }
     _save_job(request.job_id, job)
     return {"ok": True, "status": "done", "job_id": request.job_id}
+
+# =========================
+# Chatbot-driven Selenium wizard proxy
+# =========================
+# The local wizard server normally runs on the user's Mac at 127.0.0.1:18001.
+# EC2 can reach it through an SSH reverse tunnel, for example:
+#   ssh -i key.pem -N -R 18001:127.0.0.1:18001 ubuntu@<EC2_PUBLIC_IP>
+# Then set KIS_LOCAL_AGENT_URL=http://127.0.0.1:18001 on EC2.
+
+import requests
+from fastapi import Body
+
+KIS_LOCAL_AGENT_URL = (os.getenv("KIS_LOCAL_AGENT_URL") or "http://127.0.0.1:18001").rstrip("/")
+KIS_LOCAL_AGENT_TIMEOUT = float(os.getenv("KIS_LOCAL_AGENT_TIMEOUT", "240"))
+
+
+def _local_agent_headers(authorization: Optional[str]) -> Dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if authorization:
+        headers["Authorization"] = authorization
+    return headers
+
+
+def _proxy_local_agent(path: str, payload: Optional[Dict[str, Any]], authorization: Optional[str]) -> Dict[str, Any]:
+    url = f"{KIS_LOCAL_AGENT_URL}{path}"
+    try:
+        resp = requests.post(
+            url,
+            data=json.dumps(payload or {}, ensure_ascii=False).encode("utf-8"),
+            headers=_local_agent_headers(authorization),
+            timeout=KIS_LOCAL_AGENT_TIMEOUT,
+        )
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"local KIS agent unreachable: {type(e).__name__}: {e}")
+
+    try:
+        data = resp.json()
+    except Exception:
+        data = {"raw": resp.text[:1000]}
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=resp.status_code, detail=data)
+    return data
+
+
+@router.post("/session/start")
+def session_start(payload: Dict[str, Any] = Body(default_factory=dict), authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    return _proxy_local_agent("/session/start", payload, authorization)
+
+
+@router.post("/session/phone-agree")
+def session_phone_agree(payload: Dict[str, Any] = Body(default_factory=dict), authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    return _proxy_local_agent("/session/phone-agree", payload, authorization)
+
+
+@router.post("/session/resend-sms")
+def session_resend_sms(payload: Dict[str, Any] = Body(default_factory=dict), authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    return _proxy_local_agent("/session/resend-sms", payload, authorization)
+
+
+@router.post("/session/sms")
+def session_sms(payload: Dict[str, Any] = Body(default_factory=dict), authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    return _proxy_local_agent("/session/sms", payload, authorization)
+
+
+@router.post("/session/consent-next")
+def session_consent_next(payload: Dict[str, Any] = Body(default_factory=dict), authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    return _proxy_local_agent("/session/consent-next", payload, authorization)
+
+
+@router.post("/session/select-env")
+def session_select_env(payload: Dict[str, Any] = Body(default_factory=dict), authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    return _proxy_local_agent("/session/select-env", payload, authorization)
+
+
+@router.post("/session/close")
+def session_close(payload: Dict[str, Any] = Body(default_factory=dict), authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    return _proxy_local_agent("/session/close", payload, authorization)
