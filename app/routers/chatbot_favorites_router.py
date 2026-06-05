@@ -21,6 +21,18 @@ class FavoriteBaseRequest(BaseModel):
     user_id: str = Field(..., description="사용자 고유 ID")
     user_name: str = Field(..., description="사용자 이름")
 
+    # Lambda가 계좌연동 사용자별 KIS 인증정보를 요청마다 전달한다.
+    # 값이 없으면 기존 EC2 .env fallback을 사용하지 않고 보유종목 조회만 안전하게 실패 처리한다.
+    kis_env: Optional[str] = None
+    kis_appkey: Optional[str] = None
+    kis_appsecret: Optional[str] = None
+    kis_app_key: Optional[str] = None
+    kis_app_secret: Optional[str] = None
+    kis_account_no: Optional[str] = None
+    kis_account_id: Optional[str] = None
+    kis_account_suffix: Optional[str] = None
+    kis_account_product_code: Optional[str] = None
+
 
 class FavoriteSearchRequest(FavoriteBaseRequest):
     query: str = Field(..., description="검색할 종목명")
@@ -98,6 +110,37 @@ def build_quick_reply(
         item["blockId"] = block_id
 
     return item
+
+
+def _normalize_kis_env(env: Optional[str]) -> str:
+    raw = (env or "").strip().lower()
+    if raw in {"paper", "vps", "demo", "sandbox", "vts"}:
+        return "vps"
+    if raw in {"real", "prod", "production"}:
+        return "prod"
+    return ""
+
+
+def _request_hantu(request: FavoriteBaseRequest):
+    appkey = (request.kis_appkey or request.kis_app_key or "").strip()
+    appsecret = (request.kis_appsecret or request.kis_app_secret or "").strip()
+    account_no = (request.kis_account_no or request.kis_account_id or "").strip()
+    account_no = "".join(ch for ch in account_no if ch.isdigit())
+    suffix = (request.kis_account_suffix or request.kis_account_product_code or "01").strip() or "01"
+    if len(account_no) >= 10 and not (request.kis_account_suffix or request.kis_account_product_code):
+        suffix = account_no[-2:]
+        account_no = account_no[:-2]
+    env = _normalize_kis_env(request.kis_env)
+    if not (appkey and appsecret and account_no and env):
+        return None
+    from app.services.chatbot_report.HantuStock import HantuStock
+    return HantuStock(
+        api_key=appkey,
+        secret_key=appsecret,
+        account_id=account_no,
+        account_suffix=suffix,
+        env=env,
+    )
 
 
 def build_search_not_found_response() -> Dict:
@@ -507,7 +550,12 @@ def favorite_holdings(request: FavoriteBaseRequest):
     """
     started = time.time()
     chatbot = ChatbotFavorites()
-    holdings = chatbot.get_holdings_for_recommendation(limit=10)
+    per_user_hantu = _request_hantu(request)
+    if per_user_hantu is None:
+        print(f"[WARN] favorites/holdings missing per-user KIS credentials user_id={request.user_id}")
+        holdings = []
+    else:
+        holdings = chatbot.get_holdings_for_recommendation(limit=10, hantu=per_user_hantu, allow_env_fallback=False)
     print(f"[TIME] favorites/holdings rows={len(holdings or [])} elapsed={time.time() - started:.3f}s")
 
     if not holdings:

@@ -513,33 +513,35 @@ class ChatbotFavorites:
             print(f"[WARN] FDR fallback failed: {e}")
             return []
 
-    def get_holdings_for_recommendation(self, limit: int = 5) -> List[Dict]:
-        """추천 종목 화면에 함께 보여줄 보유 종목 조회.
+    def get_holdings_for_recommendation(self, limit: int = 5, hantu=None, allow_env_fallback: bool = True) -> List[Dict]:
+        """추천/보유종목 화면에 보여줄 보유 종목 조회.
 
-        추천 종목용 KIS_ENV는 vps로 유지할 수 있으므로, 보유 종목은
-        KIS_TRANSACTION_* 전용 실전 credential을 우선 사용한다.
-        실패해도 추천 종목 응답 자체는 막지 않는다.
+        Lambda에서 전달한 per-user HantuStock이 있으면 반드시 그것을 우선 사용한다.
+        allow_env_fallback=False인 호출은 EC2 .env의 공용 KIS 키로 fallback하지 않아
+        다른 사용자 계좌나 예전 AppKey로 조회되는 일을 막는다.
         """
         try:
             from app.services.chatbot_report.HantuStock import HantuStock
 
-            tx_env = (os.environ.get("KIS_TRANSACTION_ENV") or "").strip()
-            tx_key = (os.environ.get("KIS_TRANSACTION_APP_KEY") or "").strip()
-            tx_secret = (os.environ.get("KIS_TRANSACTION_APP_SECRET") or "").strip()
-            tx_account = (os.environ.get("KIS_TRANSACTION_ACCOUNT_ID") or "").strip()
-            tx_suffix = (os.environ.get("KIS_TRANSACTION_ACCOUNT_SUFFIX") or "01").strip() or "01"
+            if hantu is None and allow_env_fallback:
+                tx_env = (os.environ.get("KIS_TRANSACTION_ENV") or "").strip()
+                tx_key = (os.environ.get("KIS_TRANSACTION_APP_KEY") or "").strip()
+                tx_secret = (os.environ.get("KIS_TRANSACTION_APP_SECRET") or "").strip()
+                tx_account = (os.environ.get("KIS_TRANSACTION_ACCOUNT_ID") or "").strip()
+                tx_suffix = (os.environ.get("KIS_TRANSACTION_ACCOUNT_SUFFIX") or "01").strip() or "01"
 
-            if tx_key and tx_secret and tx_account:
-                hantu = HantuStock(
-                    api_key=tx_key,
-                    secret_key=tx_secret,
-                    account_id=tx_account,
-                    account_suffix=tx_suffix,
-                    env=tx_env or "prod",
-                )
-            elif self._hantu:
-                hantu = self._hantu
-            else:
+                if tx_key and tx_secret and tx_account:
+                    hantu = HantuStock(
+                        api_key=tx_key,
+                        secret_key=tx_secret,
+                        account_id=tx_account,
+                        account_suffix=tx_suffix,
+                        env=tx_env or "prod",
+                    )
+                elif self._hantu:
+                    hantu = self._hantu
+
+            if hantu is None:
                 return []
 
             rows = hantu.get_holding_stock_detail()
