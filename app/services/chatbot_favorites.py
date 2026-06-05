@@ -513,7 +513,7 @@ class ChatbotFavorites:
             print(f"[WARN] FDR fallback failed: {e}")
             return []
 
-    def get_holdings_for_recommendation(self, limit: int = 5, hantu=None, allow_env_fallback: bool = True) -> List[Dict]:
+    def get_holdings_for_recommendation(self, limit: int = 5, hantu=None, allow_env_fallback: bool = True, raise_on_error: bool = False) -> List[Dict]:
         """추천/보유종목 화면에 보여줄 보유 종목 조회.
 
         Lambda에서 전달한 per-user HantuStock이 있으면 반드시 그것을 우선 사용한다.
@@ -575,6 +575,8 @@ class ChatbotFavorites:
             return out
         except Exception as e:
             print(f"[WARN] recommendation holdings unavailable: {e}")
+            if raise_on_error:
+                raise
             return []
 
     # ========================================

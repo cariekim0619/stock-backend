@@ -1,5 +1,6 @@
 from typing import Dict, List, Optional, Any
 import time
+import re
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -141,6 +142,51 @@ def _request_hantu(request: FavoriteBaseRequest):
         account_suffix=suffix,
         env=env,
     )
+
+
+
+
+def _is_kis_token_rate_limit(reason: str) -> bool:
+    raw = str(reason or "")
+    low = raw.lower()
+    return "EGW00133" in raw or "token rate limited" in low or "token cooldown" in low
+
+
+def _retry_after_seconds(reason: str, default: int = 70) -> int:
+    raw = str(reason or "")
+    for pattern in (r"retry\s*after\s*(\d+)\s*s", r"(\d+)\s*초", r"(\d+)\s*s"):
+        m = re.search(pattern, raw, flags=re.I)
+        if m:
+            try:
+                return max(1, int(m.group(1)))
+            except Exception:
+                pass
+    return int(default)
+
+
+def build_kis_token_rate_limited_response(reason: str) -> Dict:
+    retry_after = _retry_after_seconds(reason)
+    text = (
+        "한국투자증권 접근토큰 발급 제한 때문에 지금은 보유 종목을 바로 조회할 수 없어요.\n\n"
+        f"약 {retry_after}초 후 다시 이용해 주세요.\n"
+        "같은 App Key로 토큰 발급은 짧은 시간 안에 반복 요청할 수 없어서 잠시 대기해야 해요."
+    )
+    return {
+        "version": "2.0",
+        "data": {
+            "holdings": [],
+            "token_rate_limited": True,
+            "retry_after": retry_after,
+            "reason": str(reason or ""),
+        },
+        "template": {
+            "outputs": [{"simpleText": {"text": text}}],
+            "quickReplies": [
+                build_quick_reply(label="보유 종목 다시 조회", message_text="보유 종목 확인하기", block_id="main_block"),
+                build_quick_reply(label="메인으로", message_text="메인으로", block_id="main_block"),
+            ],
+        },
+    }
 
 
 def build_search_not_found_response() -> Dict:
@@ -555,7 +601,18 @@ def favorite_holdings(request: FavoriteBaseRequest):
         print(f"[WARN] favorites/holdings missing per-user KIS credentials user_id={request.user_id}")
         holdings = []
     else:
-        holdings = chatbot.get_holdings_for_recommendation(limit=10, hantu=per_user_hantu, allow_env_fallback=False)
+        try:
+            holdings = chatbot.get_holdings_for_recommendation(
+                limit=10,
+                hantu=per_user_hantu,
+                allow_env_fallback=False,
+                raise_on_error=True,
+            )
+        except Exception as e:
+            print(f"[WARN] favorites/holdings unavailable: {e}")
+            if _is_kis_token_rate_limit(str(e)):
+                return build_kis_token_rate_limited_response(str(e))
+            holdings = []
     print(f"[TIME] favorites/holdings rows={len(holdings or [])} elapsed={time.time() - started:.3f}s")
 
     if not holdings:
