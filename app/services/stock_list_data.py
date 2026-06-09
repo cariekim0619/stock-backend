@@ -12,6 +12,18 @@ except ImportError:
     HantuStock = None
 
 
+
+
+def _is_recommendation_excluded_product_name(name: str) -> bool:
+    n = (name or "").upper().replace(" ", "")
+    tokens = (
+        "KODEX", "TIGER", "ACE", "KBSTAR", "SOL", "HANARO", "ARIRANG", "KOSEF",
+        "TIMEFOLIO", "RISE", "PLUS", "TREX", "FOCUS", "1Q", "WOORI", "마이티", "히어로즈",
+        "ETF", "ETN", "인버스", "레버리지", "커버드콜", "합성", "혼합", "미국채", "국채", "채권",
+    )
+    return bool(n and any(tok.upper().replace(" ", "") in n for tok in tokens))
+
+
 class StockListDataProvider:
     """종목 리스트 데이터 제공 클래스"""
 
@@ -47,16 +59,21 @@ class StockListDataProvider:
             rankings = self._hantu.get_market_ranking(category=category, limit=limit)
             if not rankings:
                 return {"error": "랭킹 데이터 없음 (장외 시간 또는 API 오류)"}
-            stocks = [
-                {
+            stocks = []
+            for item in rankings:
+                name = item.get("company_name", "")
+                # 추천 종목 화면에서는 ETF/ETN/커버드콜/합성 상품을 제외한다.
+                # 보유 종목, 리포트, 뉴스 커뮤니티 직접 조회 경로에는 이 필터를 적용하지 않는다.
+                if _is_recommendation_excluded_product_name(name):
+                    continue
+                stocks.append({
                     "ticker": item.get("symbol", ""),
-                    "name": item.get("company_name", ""),
+                    "name": name,
                     "current_price": item.get("current_price", 0),
                     "change_rate": item.get("change_rate", 0),
                     "volume": item.get("volume", 0),
-                }
-                for item in rankings
-            ]
+                })
+            stocks = stocks[:limit]
             return {"date": today, "market": "ALL", "count": len(stocks), "stocks": stocks}
         except Exception as e:
             return {"error": str(e)}

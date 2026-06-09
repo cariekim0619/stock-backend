@@ -10,6 +10,19 @@ load_dotenv()
 # 숫자 이모지 (1~10)
 NUM_EMOJIS = ["➊", "➋", "➌", "➍", "➎", "➏", "➐", "➑", "➒", "➓"]
 
+# 추천 TOP 5에서는 일반 주식만 노출한다.
+# 보유종목/직접 리포트/뉴스 커뮤니티 조회는 별도 경로라 이 필터를 적용하지 않는다.
+_RECOMMEND_EXCLUDED_PRODUCT_TOKENS = (
+    "KODEX", "TIGER", "ACE", "KBSTAR", "SOL", "HANARO", "ARIRANG", "KOSEF",
+    "TIMEFOLIO", "RISE", "PLUS", "TREX", "FOCUS", "1Q", "WOORI", "마이티", "히어로즈",
+    "ETF", "ETN", "인버스", "레버리지", "커버드콜", "합성", "혼합", "미국채", "국채", "채권",
+)
+
+
+def _is_recommendation_excluded_product_name(name: str) -> bool:
+    n = (name or "").upper().replace(" ", "")
+    return bool(n and any(tok.upper().replace(" ", "") in n for tok in _RECOMMEND_EXCLUDED_PRODUCT_TOKENS))
+
 # FDR 종목 목록 캐시 (프로세스 내 1회만 로드)
 _stock_list_cache: Optional[Dict[str, str]] = None  # name -> symbol
 
@@ -307,8 +320,7 @@ class ChatbotFavorites:
             name = str(item.get("company_name") or item.get("name") or "").strip()
             if not symbol or len(symbol) != 6 or not name or symbol in seen_symbols:
                 continue
-            upper_name = name.upper().replace(" ", "")
-            if any(tok in upper_name for tok in ("KODEX", "TIGER", "ACE", "KBSTAR", "SOL", "HANARO", "ARIRANG", "KOSEF", "ETF", "ETN")):
+            if _is_recommendation_excluded_product_name(name):
                 continue
             row = dict(item)
             row["symbol"] = symbol
@@ -495,8 +507,7 @@ class ChatbotFavorites:
                 name = str(row.get(name_col, "")).strip()
                 if not code or not name or len(code) != 6:
                     continue
-                upper_name = name.upper().replace(" ", "")
-                if any(tok in upper_name for tok in ("KODEX", "TIGER", "ACE", "KBSTAR", "SOL", "HANARO", "ARIRANG", "KOSEF", "ETF", "ETN")):
+                if _is_recommendation_excluded_product_name(name):
                     continue
                 out.append({
                     "symbol": code,

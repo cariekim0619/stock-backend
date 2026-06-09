@@ -1238,7 +1238,8 @@ class HantuStock:
             tokens = (
                 "KODEX", "TIGER", "ACE", "KBSTAR", "SOL", "HANARO",
                 "ARIRANG", "KOSEF", "TIMEFOLIO", "RISE", "PLUS",
-                "TREX", "마이티", "히어로즈", "FOCUS", "ETF", "ETN",
+                "TREX", "마이티", "히어로즈", "FOCUS", "1Q", "WOORI",
+                "ETF", "ETN", "인버스", "레버리지", "커버드콜", "합성", "혼합", "미국채", "국채", "채권",
             )
             return any(tok in n for tok in tokens)
 

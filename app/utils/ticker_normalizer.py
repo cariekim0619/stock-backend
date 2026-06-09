@@ -287,6 +287,88 @@ def _fetch_dart_corpcode_items() -> List[Dict[str, str]]:
     return items
 
 
+def _fetch_krx_listing_items() -> List[Dict[str, str]]:
+    """KRX 전체 상장 종목/ETF/ETN 보조 종목 마스터.
+
+    OpenDART corpCode는 상장법인 중심이라 ETF/ETN, 합성 상품, 일부 신규 상장 상품이
+    빠질 수 있다. 추천 TOP 5에서는 이런 상품을 별도 필터링하지만, 보유 종목/리포트/뉴스
+    커뮤니티에서는 사용자가 실제 보유하거나 직접 입력한 공식 상장 상품이면 조회되도록
+    KRX listing을 보조로 합친다.
+    """
+    try:
+        import FinanceDataReader as fdr  # type: ignore
+    except Exception as e:
+        print(f"[ticker_normalizer] KRX listing unavailable: {e}")
+        return []
+
+    try:
+        df = fdr.StockListing("KRX")
+    except Exception as e:
+        print(f"[ticker_normalizer] KRX listing fetch failed: {e}")
+        return []
+
+    if df is None or getattr(df, "empty", True):
+        return []
+
+    def _first_col(*names: str) -> str:
+        for name in names:
+            if name in df.columns:
+                return name
+        return ""
+
+    code_col = _first_col("Code", "Symbol", "종목코드", "ShortCode")
+    name_col = _first_col("Name", "종목명", "한글 종목약명", "IssueName")
+    market_col = _first_col("Market", "시장구분")
+    if not code_col or not name_col:
+        print(f"[ticker_normalizer] KRX listing columns insufficient: {list(df.columns)}")
+        return []
+
+    items: List[Dict[str, str]] = []
+    seen = set()
+    for _, row in df.iterrows():
+        code = str(row.get(code_col, "") or "").strip().upper()
+        name = str(row.get(name_col, "") or "").strip()
+        market = str(row.get(market_col, "") or "").strip() if market_col else "KRX"
+        # KIS 국내상품 코드는 대부분 6자리 숫자이나, 최근 일부 상품은 6자리 영숫자 단축코드가
+        # 노출될 수 있어 영숫자 6자도 보존한다. 기존 주식 경로는 숫자 6자리만 사용한다.
+        if code.isdigit():
+            code = code.zfill(6)
+        if not name or not re.fullmatch(r"[0-9A-Z]{6}", code):
+            continue
+        if code in seen:
+            continue
+        seen.add(code)
+        items.append({"name": name, "code": code, "source": "krx_listing", "market": market})
+
+    return items
+
+
+def _merge_stock_universe_items(*sources: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    merged: Dict[str, Dict[str, str]] = {}
+    for source in sources:
+        for item in source or []:
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("code") or "").strip().upper()
+            name = str(item.get("name") or "").strip()
+            if code.isdigit():
+                code = code.zfill(6)
+            if not name or not re.fullmatch(r"[0-9A-Z]{6}", code):
+                continue
+            if code not in merged:
+                row = dict(item)
+                row["code"] = code
+                row["name"] = name
+                merged[code] = row
+            else:
+                # DART에 있던 corp_code는 유지하되, KRX 약명이 더 최신이면 alias는 index에서 추가된다.
+                if not merged[code].get("source") and item.get("source"):
+                    merged[code]["source"] = item.get("source") or ""
+    items = list(merged.values())
+    items.sort(key=lambda x: (x.get("name") or "", x.get("code") or ""))
+    return items
+
+
 def _mark_attempted(base: Optional[Dict[str, Any]], error_text: Optional[str] = None) -> Dict[str, Any]:
     payload = dict(base or _make_empty_payload())
     payload["schema_version"] = 1
@@ -303,11 +385,14 @@ def _mark_attempted(base: Optional[Dict[str, Any]], error_text: Optional[str] = 
 def _refresh_stock_universe(base: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     payload = _mark_attempted(base)
     try:
-        items = _fetch_dart_corpcode_items()
+        dart_items = _fetch_dart_corpcode_items()
+        krx_items = _fetch_krx_listing_items()
+        items = _merge_stock_universe_items(dart_items, krx_items)
         payload.update({
             "updated_at": _now_iso(),
             "last_success_date": _today_kst_str(),
             "last_error": None,
+            "source": "opendart_corpcode+krx_listing",
             "item_count": len(items),
             "items": items,
         })
@@ -351,11 +436,18 @@ def _build_index(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
     for item in (payload or {}).get("items", []) or []:
         name = (item.get("name") or "").strip()
-        code = (item.get("code") or "").strip()
-        if not name or not _is_valid_code(code):
+        code = (item.get("code") or "").strip().upper()
+        if code.isdigit():
+            code = code.zfill(6)
+        if not name or not re.fullmatch(r"[0-9A-Z]{6}", code):
             continue
         code_to_name.setdefault(code, name)
         alias_to_code[_normalize_name_key(name)] = code
+        # KRX/FDR가 제공하는 약명/정식명 필드가 들어오면 모두 별칭으로 등록한다.
+        for alias_field in ("short_name", "full_name", "kor_name", "name"):
+            alias = str(item.get(alias_field) or "").strip()
+            if alias:
+                alias_to_code[_normalize_name_key(alias)] = code
 
     _RUNTIME_INDEX = {
         "code_to_name": code_to_name,
@@ -447,6 +539,22 @@ def get_company_name_by_symbol(symbol: str) -> Optional[str]:
     return index["code_to_name"].get(sym)
 
 
+def _lookup_krx_listing_symbol_once(raw: str) -> Optional[Tuple[str, str]]:
+    qkey = _normalize_name_key(raw)
+    if not qkey:
+        return None
+    for item in _fetch_krx_listing_items():
+        name = str(item.get("name") or "").strip()
+        code = str(item.get("code") or "").strip().upper()
+        if code.isdigit():
+            code = code.zfill(6)
+        if not name or not re.fullmatch(r"[0-9A-Z]{6}", code):
+            continue
+        if _normalize_name_key(name) == qkey:
+            return code, name
+    return None
+
+
 def resolve_symbol_and_name(ticker: str, allow_unresolved: bool = False) -> Optional[Tuple[str, str]]:
     raw = ("" if ticker is None else str(ticker)).strip()
     if not raw:
@@ -466,6 +574,10 @@ def resolve_symbol_and_name(ticker: str, allow_unresolved: bool = False) -> Opti
     code = alias_to_code.get(_normalize_name_key(raw))
     if code and code in code_to_name:
         return code, code_to_name[code]
+
+    krx_resolved = _lookup_krx_listing_symbol_once(raw)
+    if krx_resolved:
+        return krx_resolved
 
     code = MANUAL_NAME_TO_CODE.get(raw)
     if code:
