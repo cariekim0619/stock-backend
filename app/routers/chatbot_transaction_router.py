@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -12,6 +12,8 @@ service = ChatbotTransactionReport()
 class TransactionReportRequest(BaseModel):
     symbol: Optional[str] = ""
     company_name: Optional[str] = ""
+    requested_name: Optional[str] = ""
+    company_aliases: Optional[List[str]] = None
     is_account_linked: bool = False
     period: str = "1m"
     segment: str = "risk-neutral"
@@ -86,6 +88,8 @@ async def get_transaction_report(req: TransactionReportRequest):
         report = local_service.get_transaction_report(
             symbol=req.symbol or "",
             company_name=req.company_name or req.symbol or "전체 거래내역",
+            requested_name=req.requested_name or req.company_name or "",
+            company_aliases=req.company_aliases or [],
             period=req.period,
             segment=req.segment,
             profile=req.profile or req.survey_profile,

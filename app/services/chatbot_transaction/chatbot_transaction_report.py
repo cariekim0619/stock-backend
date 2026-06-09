@@ -110,46 +110,100 @@ class ChatbotTransactionReport:
             "period": period,
         }
 
-    @staticmethod
-    def _normalize_stock_code(value: Any) -> str:
+    def _normalize_stock_code(self, value: Any) -> str:
         digits = re.sub(r"\D", "", str(value or "").strip())
         if not digits:
             return ""
         if len(digits) < 6:
             digits = digits.zfill(6)
-        return digits[:6]
+        return digits[:6] if len(digits) >= 6 else digits
 
-    @staticmethod
-    def _normalize_stock_name(value: Any) -> str:
-        s = str(value or "").strip()
+    def _normalize_stock_name(self, value: Any) -> str:
+        s = str(value or "").strip().lower()
+        if not s:
+            return ""
+        # KIS 거래내역/보유종목/종목마스터 간 표기차 방어.
+        # 수동 종목 별칭이 아니라, 한국어 음차/공백/법인표기 차이를 같은 키로 정규화한다.
+        replacements = {
+            "주식회사": "",
+            "(주)": "",
+            "보통주": "",
+            "우선주": "우",
+            "엘지": "lg",
+            "씨엔에스": "cns",
+            "씨앤에스": "cns",
+            "에스케이": "sk",
+            "네이버": "naver",
+        }
+        for a, b in replacements.items():
+            s = s.replace(a, b)
         s = re.sub(r"\s+", "", s)
-        s = re.sub(r"[^0-9A-Za-z가-힣]", "", s)
-        return s.lower()
+        s = re.sub(r"[^0-9a-z가-힣]", "", s)
+        return s
 
-    def _filter_transactions_by_stock(self, transactions: List[Dict], symbol: str, company_name: str) -> List[Dict]:
-        """Filter transaction rows by code first and name as a defensive fallback.
+    def _transaction_matches_target(self, tx: Dict, *, target_codes: set, target_names: set) -> bool:
+        tx_code = self._normalize_stock_code(tx.get("pdno") or tx.get("symbol") or tx.get("ticker"))
+        if tx_code and tx_code in target_codes:
+            return True
 
-        KIS holding rows and daily-ccld rows can expose the same stock with slightly
-        different display names. The Lambda now passes the holding row's pdno, but
-        this fallback keeps transaction reports robust when pdno is blank or padded.
-        """
-        target_code = self._normalize_stock_code(symbol)
-        target_name = self._normalize_stock_name(company_name)
-        out: List[Dict] = []
-        name_fallback: List[Dict] = []
+        tx_names = {
+            self._normalize_stock_name(tx.get("prdt_name")),
+            self._normalize_stock_name(tx.get("name")),
+            self._normalize_stock_name(tx.get("company_name")),
+        }
+        tx_names = {x for x in tx_names if x}
+        if not tx_names or not target_names:
+            return False
 
-        for t in transactions or []:
-            row_code = self._normalize_stock_code(t.get("pdno") or t.get("symbol") or t.get("ticker"))
-            row_name = self._normalize_stock_name(t.get("prdt_name") or t.get("company_name") or t.get("name"))
-            if target_code and row_code and row_code == target_code:
-                out.append(t)
-                continue
-            if target_name and row_name and (target_name == row_name or target_name in row_name or row_name in target_name):
-                name_fallback.append(t)
+        if tx_names & target_names:
+            return True
 
-        return out or name_fallback
+        # 일부 KIS 응답은 'LG CNS'와 'LG씨엔에스'처럼 한쪽만 음차되어 올 수 있다.
+        # 정규화 후 한쪽이 다른 쪽을 완전히 포함하면 같은 종목으로 본다.
+        for a in tx_names:
+            for b in target_names:
+                if len(a) >= 3 and len(b) >= 3 and (a in b or b in a):
+                    return True
+        return False
 
-    def get_transaction_report(self, symbol: str = "", company_name: str = "전체 거래내역", period: str = "1m", segment: str = "risk-neutral", profile: Optional[Dict[str, Any]] = None) -> Dict:
+    def _filter_transactions_for_target(self, transactions: List[Dict], *, symbol: str, company_name: str, requested_name: str = "", company_aliases: Optional[List[str]] = None) -> List[Dict]:
+        target_codes = {self._normalize_stock_code(symbol)}
+        target_codes = {x for x in target_codes if x}
+
+        names = [company_name, requested_name, symbol]
+        if isinstance(company_aliases, list):
+            names.extend(company_aliases)
+        target_names = {self._normalize_stock_name(x) for x in names if str(x or "").strip()}
+        target_names = {x for x in target_names if x}
+
+        matched = [
+            t for t in (transactions or [])
+            if self._transaction_matches_target(t, target_codes=target_codes, target_names=target_names)
+        ]
+
+        if not matched:
+            sample = []
+            seen = set()
+            for t in (transactions or []):
+                code = str(t.get("pdno") or "").strip()
+                name = str(t.get("prdt_name") or "").strip()
+                key = (code, name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                sample.append(f"{code}:{name}")
+                if len(sample) >= 20:
+                    break
+            print(
+                "[WARN] transaction target filter empty "
+                f"symbol={symbol!r} company_name={company_name!r} requested_name={requested_name!r} "
+                f"target_codes={sorted(target_codes)} target_names={sorted(target_names)} "
+                f"available={sample}"
+            )
+
+        return matched
+
+    def get_transaction_report(self, symbol: str = "", company_name: str = "전체 거래내역", requested_name: str = "", company_aliases: Optional[List[str]] = None, period: str = "1m", segment: str = "risk-neutral", profile: Optional[Dict[str, Any]] = None) -> Dict:
         """
         거래내역 + 요약 리포트 (챗봇 말풍선 1+2 데이터)
         symbol이 비어 있으면 선택 기간의 전체 거래내역을 종목 필터 없이 집계한다.
@@ -192,27 +246,40 @@ class ChatbotTransactionReport:
             return self._error_response(str(e), segment=segment, period=period, symbol=symbol, company_name=company_name)
 
         # 2단계: 종목 필터링. symbol이 비어 있으면 기간 내 전체 거래내역을 사용한다.
-        symbol = self._normalize_stock_code(symbol)
+        # 기간 조회는 정상인데 종목 조회만 누락되는 경우는 대부분 여기서 발생한다.
+        # KIS 보유종목/거래내역/종목마스터의 코드·종목명 표기 차이를 함께 비교한다.
+        symbol = str(symbol or "").strip()
+        company_name = str(company_name or "").strip()
+        requested_name = str(requested_name or "").strip()
         is_all_transactions = not bool(symbol)
         if is_all_transactions:
             stock_transactions = list(transactions or [])
             company_name = company_name or "전체 거래내역"
         else:
-            stock_transactions = self._filter_transactions_by_stock(transactions or [], symbol, company_name)
+            stock_transactions = self._filter_transactions_for_target(
+                transactions or [],
+                symbol=symbol,
+                company_name=company_name,
+                requested_name=requested_name,
+                company_aliases=company_aliases or [],
+            )
 
-        # 선택 기간에 해당 종목 거래가 없으면, 종목별 조회에 한해 1년 범위로 1회 확장한다.
-        # 보유종목은 있지만 최근 1~3개월 내 거래가 없는 경우도 사용자가 보유종목 퀵버튼으로
-        # 리포트를 요청하면 실제 거래내역을 찾을 수 있어야 한다.
-        expanded_period = False
-        if not stock_transactions and not is_all_transactions and period != "1y":
-            try:
-                expanded_transactions = self._get_hantu().get_transaction_history(period="1y")
-                stock_transactions = self._filter_transactions_by_stock(expanded_transactions or [], symbol, company_name)
-                if stock_transactions:
-                    transactions = expanded_transactions
-                    expanded_period = True
-            except Exception as e:
-                print(f"[WARN] transaction 1y fallback failed: {type(e).__name__}: {e}")
+            # 선택 기간에 해당 종목 필터가 비면 최근 1년 원본으로 한 번 더 확인한다.
+            # 전체 거래내역에는 나오는데 종목별 조회만 비는 케이스의 원인 로그도 남긴다.
+            if not stock_transactions and period != "1y":
+                try:
+                    wider_transactions = self._get_hantu().get_transaction_history(period="1y")
+                    stock_transactions = self._filter_transactions_for_target(
+                        wider_transactions or [],
+                        symbol=symbol,
+                        company_name=company_name,
+                        requested_name=requested_name,
+                        company_aliases=company_aliases or [],
+                    )
+                    if stock_transactions:
+                        print(f"[INFO] transaction target found in 1y fallback symbol={symbol!r} company={company_name!r} count={len(stock_transactions)}")
+                except Exception as e:
+                    print(f"[WARN] transaction 1y fallback failed: {type(e).__name__}: {e}")
 
         # 거래내역 없음
         if not stock_transactions:
@@ -227,7 +294,7 @@ class ChatbotTransactionReport:
             }
 
         # 3단계: 실제 거래 기간 계산
-        dates = sorted([t["ord_dt"] for t in stock_transactions])
+        dates = sorted([t.get("ord_dt", "") for t in stock_transactions if t.get("ord_dt")])
         first_date = datetime.strptime(dates[0], "%Y%m%d")
         last_date = datetime.strptime(dates[-1], "%Y%m%d")
         actual_days = (last_date - first_date).days + 1
@@ -248,7 +315,6 @@ class ChatbotTransactionReport:
             "is_all_transactions": is_all_transactions,
             "period_days": actual_days,
             "period_insufficient": period_insufficient,
-            "expanded_period": expanded_period,
             "summary": summary,
             "rag_analysis": rag_analysis,
             "web_url": f"https://securities.koreainvestment.com/app/mtsrenewal.jsp?type=06&SSO_SCREENNO=0800",
