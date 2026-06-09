@@ -327,6 +327,7 @@ def load_stock_snapshot(ticker: str) -> Optional[Dict[str, Any]]:
         return None
 
     code, name = resolved
+    code = (code or "").strip().upper()
 
     if fdr is None:
         print("[load_stock_snapshot] FinanceDataReader 미설치 → None 반환")

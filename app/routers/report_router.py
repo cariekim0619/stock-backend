@@ -75,6 +75,10 @@ class ChatbotReportRequest(BaseModel):
 # 3) symbol / company_name / section 매핑 유틸
 # ---------------------------
 
+
+def _is_valid_symbol(symbol: str) -> bool:
+    return bool(__import__("re").fullmatch(r"[0-9A-Z]{6}", (symbol or "").strip().upper()))
+
 def _normalize_symbol(ticker: str) -> str:
     t = (ticker or "").strip()
     if not t:
@@ -91,8 +95,8 @@ def _normalize_symbol(ticker: str) -> str:
 
     if normalize_ticker:
         try:
-            normalized = normalize_ticker(t)
-            if normalized and normalized.isdigit() and len(normalized) == 6:
+            normalized = (normalize_ticker(t) or "").strip().upper()
+            if _is_valid_symbol(normalized):
                 return normalized
         except Exception:
             pass

@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
+import re
 
 from app.services.chatbot_community.chatbot_news_community import ChatbotNewsCommunity
 from app.utils.ticker_normalizer import resolve_symbol_and_name  # ✅ ticker -> (symbol, company_name)
@@ -24,6 +25,10 @@ router = APIRouter(
 )
 
 chatbot = ChatbotNewsCommunity()
+
+
+def _is_valid_symbol(symbol: str) -> bool:
+    return bool(re.fullmatch(r"[0-9A-Z]{6}", (symbol or "").strip().upper()))
 
 
 def _no_stock_kakao(ticker: str) -> dict:
@@ -48,8 +53,9 @@ def chatbot_community(req: BriefingRequest):
         return _no_stock_kakao(req.ticker)
 
     symbol, company_name = resolved
-    if not symbol or not symbol.isdigit() or len(symbol) != 6:
+    if not _is_valid_symbol(symbol):
         return _no_stock_kakao(req.ticker)
+    symbol = symbol.strip().upper()
 
     segment = normalize_segment(req.segment)
     summary = chatbot.get_community_summary(
@@ -67,8 +73,9 @@ def chatbot_news(req: BriefingRequest):
         return _no_stock_kakao(req.ticker)
 
     symbol, company_name = resolved
-    if not symbol or not symbol.isdigit() or len(symbol) != 6:
+    if not _is_valid_symbol(symbol):
         return _no_stock_kakao(req.ticker)
+    symbol = symbol.strip().upper()
 
     segment = normalize_segment(req.segment)
     summary = chatbot.get_news_summary(

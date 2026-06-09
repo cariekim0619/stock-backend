@@ -61,6 +61,13 @@ MANUAL_NAME_TO_CODE: Dict[str, str] = {
     "엘지": "003550",
     "LG우": "003555",
     "엘지우": "003555",
+    # KRX ETF/ETN 등은 숫자 6자리 대신 영숫자 6자리 단축코드가 쓰이는 경우가 있다.
+    # DART/S3 캐시에 없더라도 직접 입력/보유 종목/리포트/뉴스에서는 조회 가능해야 한다.
+    "RISE테슬라미국채타겟커버드콜혼합합성": "0013R0",
+    "RISE 테슬라미국채타겟커버드콜혼합(합성)": "0013R0",
+    "RISE 테슬라미국채타겟커버드콜혼합": "0013R0",
+    "라이즈테슬라미국채타겟커버드콜혼합합성": "0013R0",
+    "테슬라미국채타겟커버드콜혼합합성": "0013R0",
     "삼성전자우": "005935",
     "삼성전기우": "009155",
     "삼성SDI우": "006405",
@@ -98,6 +105,7 @@ MANUAL_CODE_TO_NAME: Dict[str, str] = {v: k for k, v in MANUAL_NAME_TO_CODE.item
 # 동일 코드에 여러 별칭이 있을 때 사용자에게 보여줄 대표 종목명 보정.
 # DART corpCode는 우선주를 누락하는 경우가 있어, 우선주 안전망은 여기서 명시한다.
 MANUAL_CODE_TO_NAME.update({
+    "0013R0": "RISE 테슬라미국채타겟커버드콜혼합(합성)",
     "003550": "LG",
     "003555": "LG우",
     "005935": "삼성전자우",
@@ -142,8 +150,20 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _normalize_symbol_code(code: str) -> str:
+    s = (code or "").strip().upper()
+    if s.isdigit() and len(s) < 6:
+        s = s.zfill(6)
+    return s
+
+
 def _is_valid_code(code: str) -> bool:
-    s = (code or "").strip()
+    s = _normalize_symbol_code(code)
+    return bool(re.fullmatch(r"[0-9A-Z]{6}", s))
+
+
+def _is_numeric_stock_code(code: str) -> bool:
+    s = _normalize_symbol_code(code)
     return s.isdigit() and len(s) == 6
 
 
@@ -429,9 +449,9 @@ def _build_index(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if _RUNTIME_INDEX is not None and _RUNTIME_INDEX_SIG == sig:
         return _RUNTIME_INDEX
 
-    code_to_name: Dict[str, str] = dict(MANUAL_CODE_TO_NAME)
+    code_to_name: Dict[str, str] = {_normalize_symbol_code(k): v for k, v in MANUAL_CODE_TO_NAME.items()}
     alias_to_code: Dict[str, str] = {
-        _normalize_name_key(name): code for name, code in MANUAL_NAME_TO_CODE.items()
+        _normalize_name_key(name): _normalize_symbol_code(code) for name, code in MANUAL_NAME_TO_CODE.items()
     }
 
     for item in (payload or {}).get("items", []) or []:
@@ -531,7 +551,7 @@ def normalize_ticker(ticker: str) -> str:
 
 
 def get_company_name_by_symbol(symbol: str) -> Optional[str]:
-    sym = (symbol or "").strip()
+    sym = _normalize_symbol_code(symbol)
     if not _is_valid_code(sym):
         return None
     payload = ensure_stock_universe_cache(force_refresh=False)
@@ -565,11 +585,14 @@ def resolve_symbol_and_name(ticker: str, allow_unresolved: bool = False) -> Opti
     code_to_name: Dict[str, str] = index["code_to_name"]
     alias_to_code: Dict[str, str] = index["alias_to_code"]
 
-    if raw.isdigit():
-        code = raw.zfill(6) if len(raw) < 6 else raw
-        if _is_valid_code(code) and code in code_to_name:
-            return code, code_to_name[code]
-        return (code, raw) if (allow_unresolved and _is_valid_code(code)) else None
+    raw_code = _normalize_symbol_code(raw)
+    if _is_valid_code(raw_code) and (raw_code.isdigit() or re.search(r"[A-Z]", raw_code)):
+        if raw_code in code_to_name:
+            return raw_code, code_to_name[raw_code]
+        manual_name = MANUAL_CODE_TO_NAME.get(raw_code)
+        if manual_name:
+            return raw_code, manual_name
+        return (raw_code, raw) if allow_unresolved else None
 
     code = alias_to_code.get(_normalize_name_key(raw))
     if code and code in code_to_name:
@@ -579,8 +602,9 @@ def resolve_symbol_and_name(ticker: str, allow_unresolved: bool = False) -> Opti
     if krx_resolved:
         return krx_resolved
 
-    code = MANUAL_NAME_TO_CODE.get(raw)
+    code = MANUAL_NAME_TO_CODE.get(raw) or MANUAL_NAME_TO_CODE.get(_normalize_name_key(raw))
     if code:
+        code = _normalize_symbol_code(code)
         return code, MANUAL_CODE_TO_NAME.get(code, raw)
 
     return (raw, raw) if allow_unresolved else None
