@@ -231,10 +231,23 @@ class ChatbotTransactionReport:
 
     @staticmethod
     def _normalize_stock_code(value) -> str:
-        digits = "".join(ch for ch in str(value or "").strip() if ch.isdigit())
-        if not digits:
+        """Normalize KRX/KIS product code for transaction lookup.
+
+        Most domestic stocks use numeric 6-digit codes, but some listed ETF/ETN
+        products use 6-character alphanumeric product numbers such as 0013R0.
+        Transaction/report/community paths should accept those official codes;
+        only recommendation TOP 5 filtering excludes ETF/ETN-like products.
+        """
+        raw = str(value or "").strip().upper()
+        if not raw:
             return ""
-        if len(digits) < 6:
+        compact = re.sub(r"[^0-9A-Z]", "", raw)
+        if compact.isdigit() and len(compact) < 6:
+            compact = compact.zfill(6)
+        if re.fullmatch(r"[0-9A-Z]{6}", compact):
+            return compact
+        digits = re.sub(r"\D", "", raw)
+        if digits and len(digits) < 6:
             digits = digits.zfill(6)
         return digits[:6] if len(digits) >= 6 else ""
 

@@ -5,6 +5,7 @@ import pandas as pd
 import time
 import requests
 import json
+import re
 from datetime import datetime
 
 try:
@@ -943,10 +944,14 @@ class HantuStock:
             delta = period_map.get(period, relativedelta(months=1))
             start_date = (today - delta).strftime("%Y%m%d")
 
-        pdno = "".join(ch for ch in str(pdno or "").strip() if ch.isdigit())
-        if pdno and len(pdno) < 6:
+        # KIS domestic product number can be numeric 6 digits or alphanumeric
+        # 6 chars for some ETF/ETN products (e.g. 0013R0). Keep official
+        # alphanumeric codes for transaction lookup instead of stripping letters.
+        raw_pdno = str(pdno or "").strip().upper()
+        pdno = re.sub(r"[^0-9A-Z]", "", raw_pdno)
+        if pdno.isdigit() and len(pdno) < 6:
             pdno = pdno.zfill(6)
-        pdno = pdno[:6] if len(pdno) >= 6 else ""
+        pdno = pdno if re.fullmatch(r"[0-9A-Z]{6}", pdno) else ""
 
         if self._env == "vps":
             rows = self._read_transaction_log(start_date, end_date, sll_buy_dvsn)
