@@ -116,7 +116,9 @@ class HantuStock:
             "inquire-balance": "8434R",
             "order-buy": "0012U",
             "order-sell": "0011U",
-            "inquire-daily-ccld": "8001R",  # 주식일별주문체결조회 (3개월 이내)
+            # 주식일별주문체결조회: 공식 샘플 기준 최근 3개월 이내는 TTTC/VTTC0081R.
+            # 3개월 이전 조회는 별도 CTSC/VTSC9215R을 사용한다.
+            "inquire-daily-ccld": "0081R",
             "inquire-pending": "8036R",     # 미체결 주문 조회
             "order-cancel": "0803U",        # 주문 취소
         }
@@ -860,35 +862,72 @@ class HantuStock:
         return round(running_avg, 2)
 
     # -------------------- 거래내역 조회 --------------------
+    def _daily_ccld_tr_id(self, *, pd_dv: str = "inner") -> str:
+        """TR ID for domestic stock daily order/fill history.
+
+        Official KIS samples use:
+        - real inner: TTTC0081R
+        - demo inner: VTTC0081R
+        - real before-3-months: CTSC9215R
+        - demo before-3-months: VTSC9215R
+        """
+        env = "real" if self._env == "prod" else "demo"
+        if (pd_dv or "inner") == "before":
+            return "CTSC9215R" if env == "real" else "VTSC9215R"
+        return "TTTC0081R" if env == "real" else "VTTC0081R"
+
+    @staticmethod
+    def _yyyymmdd_to_dt(value: str):
+        return datetime.strptime(str(value), "%Y%m%d")
+
+    def _daily_ccld_slices(self, start_date: str, end_date: str) -> list[tuple[str, str, str]]:
+        """Split query ranges into official inner/before windows.
+
+        KIS daily fill history has a separate TR for records older than about 3 months.
+        Keeping the split here avoids breaking the existing period flow while making
+        1y fallback and older date queries more reliable.
+        """
+        start_dt = self._yyyymmdd_to_dt(start_date)
+        end_dt = self._yyyymmdd_to_dt(end_date)
+        boundary_dt = datetime.now() - relativedelta(months=3)
+        if start_dt >= boundary_dt:
+            return [("inner", start_date, end_date)]
+        if end_dt < boundary_dt:
+            return [("before", start_date, end_date)]
+        before_end = (boundary_dt - relativedelta(days=1)).strftime("%Y%m%d")
+        inner_start = boundary_dt.strftime("%Y%m%d")
+        return [("before", start_date, before_end), ("inner", inner_start, end_date)]
+
+    @staticmethod
+    def _safe_int(value, default: int = 0) -> int:
+        try:
+            return int(float(str(value or "0").replace(",", "")))
+        except Exception:
+            return default
+
+    @staticmethod
+    def _safe_float(value, default: float = 0.0) -> float:
+        try:
+            return float(str(value or "0").replace(",", ""))
+        except Exception:
+            return default
+
     def get_transaction_history(
         self,
         start_date: str = None,
         end_date: str = None,
         period: str = "1m",
-        sll_buy_dvsn: str = "00"
+        sll_buy_dvsn: str = "00",
+        pdno: str = ""
     ) -> list:
         """
         주식일별주문체결조회 (기획 2-4: 거래 내역 리포트)
 
-        Args:
-            start_date: 조회시작일자 (YYYYMMDD), None이면 period로 계산
-            end_date: 조회종료일자 (YYYYMMDD), None이면 오늘
-            period: 기간 ("1m": 1개월, "3m": 3개월, "1y": 1년)
-            sll_buy_dvsn: 매도매수구분 ("00":전체, "01":매도, "02":매수)
-
-        Returns:
-            list[dict]: 거래내역 리스트
-                - ord_dt: 주문일자
-                - pdno: 종목코드
-                - prdt_name: 종목명
-                - sll_buy_dvsn_cd: 매도매수구분 (01:매도, 02:매수)
-                - sll_buy_dvsn_cd_name: 매도매수구분명
-                - ord_qty: 주문수량
-                - tot_ccld_qty: 총체결수량
-                - avg_prvs: 체결평균가
-                - tot_ccld_amt: 총체결금액
+        시간외/NXT/SOR 체결 누락 방지:
+        - 공식 TR ID(TTTC/VTTC0081R, CTSC/VTSC9215R)를 사용한다.
+        - EXCG_ID_DVSN_CD를 기본 ALL로 전송해 KRX/NXT/SOR 계열 체결을 함께 조회한다.
+        - 원본의 주문구분/주문시각/거래소구분 필드를 보존해 시간외 체결 여부를 로그/리포트에서 추적할 수 있게 한다.
         """
-        # 날짜 계산
         today = datetime.now()
         if end_date is None:
             end_date = today.strftime("%Y%m%d")
@@ -904,66 +943,114 @@ class HantuStock:
             delta = period_map.get(period, relativedelta(months=1))
             start_date = (today - delta).strftime("%Y%m%d")
 
-        # VPS(모의투자) 모드: KIS API output1 미지원 → 로컬 로그 사용
+        pdno = "".join(ch for ch in str(pdno or "").strip() if ch.isdigit())
+        if pdno and len(pdno) < 6:
+            pdno = pdno.zfill(6)
+        pdno = pdno[:6] if len(pdno) >= 6 else ""
+
         if self._env == "vps":
-            return self._read_transaction_log(start_date, end_date, sll_buy_dvsn)
+            rows = self._read_transaction_log(start_date, end_date, sll_buy_dvsn)
+            return [r for r in rows if str(r.get("pdno", "")).strip() == pdno] if pdno else rows
 
-        headers = self._header(self._tr("inquire-daily-ccld"))
         out = []
-        cont = True
-        fk100 = ""
-        nk100 = ""
+        exchange = (os.getenv("KIS_DAILY_CCLD_EXCHANGE") or "ALL").strip().upper() or "ALL"
+        if exchange not in {"KRX", "NXT", "SOR", "ALL"}:
+            exchange = "ALL"
 
-        while cont:
-            params = {
-                "CANO": self._account_id,
-                "ACNT_PRDT_CD": self._account_suffix,
-                "INQR_STRT_DT": start_date,
-                "INQR_END_DT": end_date,
-                "SLL_BUY_DVSN_CD": sll_buy_dvsn,
-                "INQR_DVSN": "00",
-                "PDNO": "",
-                "CCLD_DVSN": "00",
-                "ORD_GNO_BRNO": "",
-                "ODNO": "",
-                "INQR_DVSN_3": "00",
-                "INQR_DVSN_1": "",
-                "CTX_AREA_FK100": fk100,
-                "CTX_AREA_NK100": nk100,
-            }
-            url = self._base_url + "/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
-            hd, res = self._request(url, headers, params)
+        for pd_dv, slice_start, slice_end in self._daily_ccld_slices(start_date, end_date):
+            headers = self._header(self._daily_ccld_tr_id(pd_dv=pd_dv))
+            cont = True
+            fk100 = ""
+            nk100 = ""
+            page = 0
 
-            if res.get("rt_cd") != "0":
-                print(f"[ERROR] get_transaction_history: {res.get('msg1')}")
-                break
+            while cont:
+                page += 1
+                params = {
+                    "CANO": self._account_id,
+                    "ACNT_PRDT_CD": self._account_suffix,
+                    "INQR_STRT_DT": slice_start,
+                    "INQR_END_DT": slice_end,
+                    "SLL_BUY_DVSN_CD": sll_buy_dvsn,
+                    "PDNO": pdno,
+                    "CCLD_DVSN": "00",
+                    "INQR_DVSN": "00",
+                    "INQR_DVSN_3": "00",
+                    "ORD_GNO_BRNO": "",
+                    "ODNO": "",
+                    "INQR_DVSN_1": "",
+                    "CTX_AREA_FK100": fk100,
+                    "CTX_AREA_NK100": nk100,
+                    "EXCG_ID_DVSN_CD": exchange,
+                }
+                url = self._base_url + "/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
+                hd, res = self._request(url, headers, params)
 
-            cont = hd.get("tr_cont") in {"F", "M"}
-            headers["tr_cont"] = "N"
-            fk100 = res.get("ctx_area_fk100", "")
-            nk100 = res.get("ctx_area_nk100", "")
-            out += res.get("output1", [])
+                if res.get("rt_cd") != "0":
+                    print(
+                        f"[ERROR] get_transaction_history: msg={res.get('msg1')} "
+                        f"pd_dv={pd_dv} range={slice_start}~{slice_end} pdno={pdno} exchange={exchange}"
+                    )
+                    break
 
-        # 필요한 필드만 추출하여 정리
+                rows = res.get("output1", []) or []
+                out += rows
+                cont = hd.get("tr_cont") in {"F", "M"}
+                headers["tr_cont"] = "N"
+                fk100 = res.get("ctx_area_fk100", "")
+                nk100 = res.get("ctx_area_nk100", "")
+
+                if page == 1 or cont:
+                    sample = [
+                        f"{str(r.get('pdno','')).strip()}:{str(r.get('prdt_name','')).strip()}:{str(r.get('ord_dvsn_name','')).strip()}:{str(r.get('ord_tmd','')).strip()}:{str(r.get('excg_dvsn_cd') or r.get('excg_id_dvsn_Cd') or '').strip()}"
+                        for r in rows[:5]
+                    ]
+                    print(
+                        f"[INFO] daily_ccld query pd_dv={pd_dv} range={slice_start}~{slice_end} "
+                        f"pdno={pdno or '-'} exchange={exchange} page={page} rows={len(rows)} sample={sample}"
+                    )
+
         result = []
+        today_ymd = datetime.now().strftime("%Y%m%d")
+        overtime_count = 0
+        today_count = 0
+
         for r in out:
-            # 체결수량이 0인 건 제외 (미체결)
-            ccld_qty = int(r.get("tot_ccld_qty", 0))
+            ccld_qty = self._safe_int(r.get("tot_ccld_qty", 0))
             if ccld_qty == 0:
                 continue
 
+            ord_dvsn_name = str(r.get("ord_dvsn_name") or "").strip()
+            ord_dvsn_cd = str(r.get("ord_dvsn_cd") or "").strip()
+            ccld_cndt_name = str(r.get("ccld_cndt_name") or "").strip()
+            excg = str(r.get("excg_dvsn_cd") or r.get("excg_id_dvsn_Cd") or r.get("excg_id_dvsn_cd") or "").strip()
+            is_overtime = any(token in (ord_dvsn_name + ccld_cndt_name) for token in ("시간외", "단일가", "장전", "장후"))
+            if is_overtime:
+                overtime_count += 1
+            if str(r.get("ord_dt", "")).strip() == today_ymd:
+                today_count += 1
+
             result.append({
                 "ord_dt": r.get("ord_dt", ""),
+                "ord_tmd": r.get("ord_tmd", ""),
                 "pdno": r.get("pdno", ""),
                 "prdt_name": r.get("prdt_name", ""),
                 "sll_buy_dvsn_cd": r.get("sll_buy_dvsn_cd", ""),
                 "sll_buy_dvsn_cd_name": r.get("sll_buy_dvsn_cd_name", ""),
-                "ord_qty": int(r.get("ord_qty", 0)),
+                "ord_dvsn_cd": ord_dvsn_cd,
+                "ord_dvsn_name": ord_dvsn_name,
+                "ccld_cndt_name": ccld_cndt_name,
+                "excg_dvsn_cd": excg,
+                "ord_qty": self._safe_int(r.get("ord_qty", 0)),
                 "tot_ccld_qty": ccld_qty,
-                "avg_prvs": float(r.get("avg_prvs", 0)),
-                "tot_ccld_amt": float(r.get("tot_ccld_amt", 0)),
+                "avg_prvs": self._safe_float(r.get("avg_prvs", 0)),
+                "tot_ccld_amt": self._safe_float(r.get("tot_ccld_amt", 0)),
             })
 
+        print(
+            f"[INFO] daily_ccld normalized period={period} range={start_date}~{end_date} "
+            f"pdno={pdno or '-'} result_count={len(result)} today_count={today_count} overtime_like_count={overtime_count}"
+        )
         return result
 
     def _get_prod_token(self, prod_key: str, prod_secret: str) -> str:

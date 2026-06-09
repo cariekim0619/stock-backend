@@ -110,46 +110,6 @@ class ChatbotTransactionReport:
             "period": period,
         }
 
-    def _normalize_stock_code(self, value: Any) -> str:
-        digits = re.sub(r"\D", "", str(value or "").strip())
-        if not digits:
-            return ""
-        if len(digits) < 6:
-            digits = digits.zfill(6)
-        return digits[:6] if len(digits) >= 6 else ""
-
-    def _normalize_stock_name(self, value: Any) -> str:
-        s = str(value or "").strip().lower()
-        if not s:
-            return ""
-        # 회사 표기 차이와 공백/특수문자만 제거한다.
-        # 특정 종목을 수동 별칭으로 추가하지 않고, KIS 거래내역 prdt_name과
-        # Lambda company_name이 같은 종목인지 비교하기 위한 보조 키다.
-        replacements = {
-            "주식회사": "",
-            "(주)": "",
-            " ": "",
-            "보통주": "",
-            "우선주": "우",
-        }
-        for a, b in replacements.items():
-            s = s.replace(a, b)
-        s = re.sub(r"[^0-9a-z가-힣]", "", s)
-        return s
-
-    def _is_target_transaction(self, tx: Dict[str, Any], *, symbol: str, company_name: str) -> bool:
-        target_code = self._normalize_stock_code(symbol)
-        tx_code = self._normalize_stock_code(tx.get("pdno"))
-        if target_code and tx_code and target_code == tx_code:
-            return True
-
-        target_name = self._normalize_stock_name(company_name)
-        tx_name = self._normalize_stock_name(tx.get("prdt_name"))
-        if target_name and tx_name and target_name == tx_name:
-            return True
-
-        return False
-
     def get_transaction_report(self, symbol: str = "", company_name: str = "전체 거래내역", period: str = "1m", segment: str = "risk-neutral", profile: Optional[Dict[str, Any]] = None) -> Dict:
         """
         거래내역 + 요약 리포트 (챗봇 말풍선 1+2 데이터)
@@ -184,8 +144,17 @@ class ChatbotTransactionReport:
         """
         segment = normalize_segment(segment)
         # 1단계: 거래내역 조회
+        # - 전체 기간 조회(symbol 없음)는 기존처럼 전체 거래내역을 조회한다.
+        # - 종목 조회(symbol 있음)는 KIS 요청 단계부터 PDNO를 넣어 해당 종목만 조회한다.
+        #   기존에는 전체 거래내역을 가져온 뒤 pdno로만 필터링했는데, 일부 종목은
+        #   현재 period 원본에 포함되지 않아 종목 조회만 비는 문제가 있었다.
+        symbol = self._normalize_stock_code(symbol)
+        is_all_transactions = not bool(symbol)
         try:
-            transactions = self._get_hantu().get_transaction_history(period=period)
+            transactions = self._get_hantu().get_transaction_history(
+                period=period,
+                pdno=("" if is_all_transactions else symbol),
+            )
         except Exception as e:
             print(f"[ERROR] get_transaction_report: transaction history failed: {e}")
             if self._is_kis_token_rate_limit(str(e)):
@@ -193,25 +162,25 @@ class ChatbotTransactionReport:
             return self._error_response(str(e), segment=segment, period=period, symbol=symbol, company_name=company_name)
 
         # 2단계: 종목 필터링. symbol이 비어 있으면 기간 내 전체 거래내역을 사용한다.
-        symbol = str(symbol or "").strip()
-        is_all_transactions = not bool(symbol)
         if is_all_transactions:
             stock_transactions = list(transactions or [])
             company_name = company_name or "전체 거래내역"
         else:
-            stock_transactions = [
-                t for t in (transactions or [])
-                if self._is_target_transaction(t, symbol=symbol, company_name=company_name)
-            ]
-            if not stock_transactions:
-                sample = []
-                for t in (transactions or [])[:12]:
-                    sample.append(f"{self._normalize_stock_code(t.get('pdno'))}:{t.get('prdt_name', '')}")
-                print(
-                    "[WARN] transaction stock filter empty "
-                    f"symbol={symbol!r} company_name={company_name!r} "
-                    f"tx_count={len(transactions or [])} sample={sample}"
-                )
+            stock_transactions = self._filter_transactions_by_stock(transactions or [], symbol, company_name)
+
+            # 종목 조회만 보강: 현재 선택 기간에 해당 종목 row가 없으면 최근 1년 범위로 한 번 더 확인한다.
+            # 기간으로 조회 플로우는 건드리지 않고, 결과도 symbol을 유지해 전체 거래내역 리포트로 바뀌지 않는다.
+            if not stock_transactions and period != "1y":
+                sample = [f"{str(t.get('pdno', '')).strip()}:{str(t.get('prdt_name', '')).strip()}" for t in (transactions or [])[:10]]
+                print(f"[WARN] transaction stock filter empty symbol='{symbol}' company_name='{company_name}' period='{period}' tx_count={len(transactions or [])} sample={sample}; retry period='1y'")
+                try:
+                    retry_transactions = self._get_hantu().get_transaction_history(period="1y", pdno=symbol)
+                except Exception as e:
+                    print(f"[WARN] transaction stock retry failed symbol='{symbol}' type={type(e).__name__}: {e}")
+                    retry_transactions = []
+                stock_transactions = self._filter_transactions_by_stock(retry_transactions or [], symbol, company_name)
+                if stock_transactions:
+                    period = "1y"
 
         # 거래내역 없음
         if not stock_transactions:
@@ -259,12 +228,49 @@ class ChatbotTransactionReport:
     # 거래 요약 계산
     # ========================================
 
+
+    @staticmethod
+    def _normalize_stock_code(value) -> str:
+        digits = "".join(ch for ch in str(value or "").strip() if ch.isdigit())
+        if not digits:
+            return ""
+        if len(digits) < 6:
+            digits = digits.zfill(6)
+        return digits[:6] if len(digits) >= 6 else ""
+
+    @staticmethod
+    def _normalize_stock_name(value) -> str:
+        import re
+        s = str(value or "").strip().lower()
+        s = s.replace("주식회사", "").replace("(주)", "")
+        s = re.sub(r"\s+", "", s)
+        s = re.sub(r"[^0-9a-z가-힣]", "", s)
+        # KIS 거래내역/보유종목 화면에서 한글/영문 표기가 섞일 수 있는 대표 표기를 최소 정규화
+        s = s.replace("씨엔에스", "cns")
+        s = s.replace("엘지", "lg")
+        return s
+
+    def _filter_transactions_by_stock(self, transactions: List[Dict], symbol: str, company_name: str = "") -> List[Dict]:
+        target_code = self._normalize_stock_code(symbol)
+        target_name = self._normalize_stock_name(company_name)
+        out: List[Dict] = []
+        for t in transactions or []:
+            row_code = self._normalize_stock_code(t.get("pdno", ""))
+            if target_code and row_code == target_code:
+                out.append(t)
+                continue
+            row_name = self._normalize_stock_name(t.get("prdt_name", ""))
+            if target_name and row_name and (row_name == target_name or target_name in row_name or row_name in target_name):
+                out.append(t)
+        return out
+
     def _calculate_summary(self, transactions: List[Dict]) -> Dict:
         """종목 거래 요약 계산"""
         buy_trades = 0
         sell_trades = 0
         buy_amount = 0
         sell_amount = 0
+        overtime_trades = 0
 
         for t in transactions:
             is_buy = str(t.get("sll_buy_dvsn_cd", "")) == "02"
@@ -272,6 +278,10 @@ class ChatbotTransactionReport:
                 amt = float(t.get("tot_ccld_amt") or 0)
             except Exception:
                 amt = 0
+
+            order_blob = f"{t.get('ord_dvsn_name', '')} {t.get('ccld_cndt_name', '')}"
+            if any(token in order_blob for token in ("시간외", "단일가", "장전", "장후")):
+                overtime_trades += 1
 
             if is_buy:
                 buy_trades += 1
@@ -289,6 +299,7 @@ class ChatbotTransactionReport:
             "buy_amount": buy_amount,
             "sell_amount": sell_amount,
             "realized_profit": realized_profit,
+            "overtime_trades": overtime_trades,
         }
 
     # ========================================
@@ -363,6 +374,8 @@ class ChatbotTransactionReport:
         lines.append(f"총 매수금액: {summary['buy_amount']:,.0f}원")
         lines.append(f"총 매도금액: {summary['sell_amount']:,.0f}원")
         lines.append(f"실현손익: {summary['realized_profit']:+,.0f}원")
+        if summary.get("overtime_trades", 0):
+            lines.append(f"시간외/단일가 체결: {summary.get('overtime_trades', 0)}회")
         lines.append("")
 
         # 개별 거래 내역
@@ -376,7 +389,9 @@ class ChatbotTransactionReport:
             amount = float(t.get("tot_ccld_amt") or 0)
             stock_name = str(t.get("prdt_name") or t.get("pdno") or "").strip()
             name_prefix = f" {stock_name}" if stock_name else ""
-            lines.append(f"  {formatted_date}{name_prefix} {side} {qty}주 @ {price:,.0f}원 (총 {amount:,.0f}원)")
+            order_name = str(t.get("ord_dvsn_name") or t.get("ccld_cndt_name") or "").strip()
+            order_suffix = f" [{order_name}]" if order_name else ""
+            lines.append(f"  {formatted_date}{name_prefix} {side} {qty}주 @ {price:,.0f}원 (총 {amount:,.0f}원){order_suffix}")
 
         return "\n".join(lines)
 
@@ -546,6 +561,8 @@ class ChatbotTransactionReport:
         message_1 += f"• 총 매수금액 : {buy_amount_str}원\n"
         message_1 += f"• 총 매도금액 : {sell_amount_str}원\n"
         message_1 += f"• 실현손익(매도 기준) : {profit_sign}{profit:,.0f}원"
+        if summary.get("overtime_trades", 0):
+            message_1 += f"\n• 시간외/단일가 체결 : {summary.get('overtime_trades', 0)}회"
 
         if period_insufficient:
             message_1 = f"선택한 기간 안에서 거래내역을 확인했어요.\n\n이 거래내역을 기준으로\n요약 리포트를 작성해드릴게요 !\n잠시만 기다려주세요!\n\n{message_1}"
