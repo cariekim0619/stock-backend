@@ -110,6 +110,45 @@ class ChatbotTransactionReport:
             "period": period,
         }
 
+    @staticmethod
+    def _normalize_stock_code(value: Any) -> str:
+        digits = re.sub(r"\D", "", str(value or "").strip())
+        if not digits:
+            return ""
+        if len(digits) < 6:
+            digits = digits.zfill(6)
+        return digits[:6]
+
+    @staticmethod
+    def _normalize_stock_name(value: Any) -> str:
+        s = str(value or "").strip()
+        s = re.sub(r"\s+", "", s)
+        s = re.sub(r"[^0-9A-Za-z가-힣]", "", s)
+        return s.lower()
+
+    def _filter_transactions_by_stock(self, transactions: List[Dict], symbol: str, company_name: str) -> List[Dict]:
+        """Filter transaction rows by code first and name as a defensive fallback.
+
+        KIS holding rows and daily-ccld rows can expose the same stock with slightly
+        different display names. The Lambda now passes the holding row's pdno, but
+        this fallback keeps transaction reports robust when pdno is blank or padded.
+        """
+        target_code = self._normalize_stock_code(symbol)
+        target_name = self._normalize_stock_name(company_name)
+        out: List[Dict] = []
+        name_fallback: List[Dict] = []
+
+        for t in transactions or []:
+            row_code = self._normalize_stock_code(t.get("pdno") or t.get("symbol") or t.get("ticker"))
+            row_name = self._normalize_stock_name(t.get("prdt_name") or t.get("company_name") or t.get("name"))
+            if target_code and row_code and row_code == target_code:
+                out.append(t)
+                continue
+            if target_name and row_name and (target_name == row_name or target_name in row_name or row_name in target_name):
+                name_fallback.append(t)
+
+        return out or name_fallback
+
     def get_transaction_report(self, symbol: str = "", company_name: str = "전체 거래내역", period: str = "1m", segment: str = "risk-neutral", profile: Optional[Dict[str, Any]] = None) -> Dict:
         """
         거래내역 + 요약 리포트 (챗봇 말풍선 1+2 데이터)
@@ -153,15 +192,27 @@ class ChatbotTransactionReport:
             return self._error_response(str(e), segment=segment, period=period, symbol=symbol, company_name=company_name)
 
         # 2단계: 종목 필터링. symbol이 비어 있으면 기간 내 전체 거래내역을 사용한다.
-        symbol = str(symbol or "").strip()
+        symbol = self._normalize_stock_code(symbol)
         is_all_transactions = not bool(symbol)
         if is_all_transactions:
             stock_transactions = list(transactions or [])
             company_name = company_name or "전체 거래내역"
         else:
-            stock_transactions = [
-                t for t in (transactions or []) if str(t.get("pdno", "")).strip() == symbol
-            ]
+            stock_transactions = self._filter_transactions_by_stock(transactions or [], symbol, company_name)
+
+        # 선택 기간에 해당 종목 거래가 없으면, 종목별 조회에 한해 1년 범위로 1회 확장한다.
+        # 보유종목은 있지만 최근 1~3개월 내 거래가 없는 경우도 사용자가 보유종목 퀵버튼으로
+        # 리포트를 요청하면 실제 거래내역을 찾을 수 있어야 한다.
+        expanded_period = False
+        if not stock_transactions and not is_all_transactions and period != "1y":
+            try:
+                expanded_transactions = self._get_hantu().get_transaction_history(period="1y")
+                stock_transactions = self._filter_transactions_by_stock(expanded_transactions or [], symbol, company_name)
+                if stock_transactions:
+                    transactions = expanded_transactions
+                    expanded_period = True
+            except Exception as e:
+                print(f"[WARN] transaction 1y fallback failed: {type(e).__name__}: {e}")
 
         # 거래내역 없음
         if not stock_transactions:
@@ -197,6 +248,7 @@ class ChatbotTransactionReport:
             "is_all_transactions": is_all_transactions,
             "period_days": actual_days,
             "period_insufficient": period_insufficient,
+            "expanded_period": expanded_period,
             "summary": summary,
             "rag_analysis": rag_analysis,
             "web_url": f"https://securities.koreainvestment.com/app/mtsrenewal.jsp?type=06&SSO_SCREENNO=0800",
